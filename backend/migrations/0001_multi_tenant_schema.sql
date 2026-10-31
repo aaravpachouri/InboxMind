@@ -53,7 +53,8 @@ CREATE TABLE IF NOT EXISTS gmail_accounts (
     connected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     revoked_at TIMESTAMPTZ,
     UNIQUE(user_id, google_account_sub),
-    UNIQUE(user_id, email)
+    UNIQUE(user_id, email),
+    UNIQUE(user_id, id)
 );
 CREATE INDEX IF NOT EXISTS idx_gmail_accounts_user ON gmail_accounts(user_id);
 
