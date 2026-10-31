@@ -2,13 +2,13 @@ services:
   - type: web
     name: inboxmind-api
     runtime: python
-    plan: starter
+    plan: free
     region: singapore
     repo: https://github.com/aaravpachouri/InboxMind
     branch: feat/secure-multi-tenant-deployment
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn gmail_agent.main:app --host 0.0.0.0 --port $PORT
+    startCommand: python -m gmail_agent.migrate && uvicorn gmail_agent.public_app:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/v1/health
     autoDeployTrigger: commit
     envVars:
@@ -41,7 +41,7 @@ services:
 databases:
   - name: inboxmind-postgres
     databaseName: inboxmind
-    plan: basic_256mb
+    plan: free
     region: singapore
     postgresMajorVersion: "18"
     ipAllowList: []
