@@ -97,6 +97,7 @@ def _require_csrf(request: Request, user: dict[str, Any]) -> None:
         raise HTTPException(403, "CSRF validation failed. Refresh the page and retry.")
 
 
+@app.get("/health")
 @app.get("/api/v1/health")
 def health() -> dict[str, str]:
     pool = _pool_or_503()
@@ -199,6 +200,19 @@ async def google_callback(code: str = "", state: str = "", error: str = "") -> R
     return response
 
 
+@app.get("/api/v1/auth/status")
+def auth_status(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+    if not session:
+        return {"connected": False, "email": None, "message": "Sign in with Google to connect your Gmail account."}
+    try:
+        user = _current_user(session)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return {"connected": False, "email": None, "message": "Session expired. Sign in again."}
+        raise
+    return {"connected": True, "email": user["email"], "message": "Gmail connected through Google OAuth."}
+
+
 @app.get("/api/v1/auth/me")
 def auth_me(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
@@ -219,6 +233,7 @@ def logout(request: Request, response: Response,
     return {"ok": True}
 
 
+@app.get("/api/v1/emails")
 @app.get("/api/v1/gmail/emails")
 def list_emails(limit: int = Query(default=25, ge=1, le=100),
                 session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
@@ -263,7 +278,7 @@ def list_emails(limit: int = Query(default=25, ge=1, le=100),
                              "labels": msg.get("labelIds", []), "is_unread": "UNREAD" in msg.get("labelIds", []),
                              "is_sent": "SENT" in msg.get("labelIds", []),
                              "has_attachments": any(p.get("filename") for p in msg.get("payload", {}).get("parts", []))})
-        return {"items": messages, "total": len(messages), "account_email": account["email"]}
+        return {"items": messages, "total": len(messages), "total_estimate": len(messages), "next_page_token": None, "source": "gmail", "account_email": account["email"]}
     except HTTPException:
         raise
     except Exception as exc:
