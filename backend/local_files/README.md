@@ -1,0 +1,1 @@
+Place documents you explicitly want the agent to index in this directory. Supported formats: TXT, Markdown, CSV, JSON, PDF, and LOG. Files stay local; indexing stores extracted text in the local SQLite database. Do not place secrets or documents you do not want indexed here.

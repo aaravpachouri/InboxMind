@@ -1,0 +1,42 @@
+# Local credentials and runtime data
+.env
+.env.*
+!.env.example
+backend/.env
+backend/data/
+backend/.venv/
+backend/.pytest_cache/
+backend/**/__pycache__/
+frontend/.env.local
+frontend/node_modules/
+frontend/dist/
+
+# Secrets and OAuth credentials
+**/credentials.json
+**/token.json
+**/client_secret*.json
+**/*oauth*secret*.json
+**/*.pem
+**/*.key
+
+# Local databases, logs, and runtime artifacts
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# Local backups and temporary files
+*.backup_*
+*.bak
+*.tmp
+
+# Local environment files and runtime data
+.env
+.env.*
+!.env.example
+**/data/
+**/.venv/
+**/node_modules/
+**/dist/
+**/__pycache__/
+**/.pytest_cache/
