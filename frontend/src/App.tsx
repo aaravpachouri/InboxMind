@@ -985,11 +985,10 @@ export default function App() {
     finally { setBusy(null); }
   };
 
-  const openLogin = async () => {
-    setBusy('login');
-    try { const result = await api<{ authorization_url: string }>('/auth/google/login'); window.open(result.authorization_url, '_blank', 'noopener,noreferrer'); notify('Finish Google authorization in the new tab, then refresh the workspace.', 'info'); }
-    catch (error) { notify(errorText(error), 'error'); }
-    finally { setBusy(null); }
+  const openLogin = () => {
+    // OAuth must be a top-level navigation so the same-origin Vercel API proxy can
+    // set the session cookie before Google redirects back to the application.
+    window.location.assign(`${API_BASE}/auth/google/login`);
   };
 
   const currentTitle = NAV.find((item) => item.id === view)?.label || 'Overview';
