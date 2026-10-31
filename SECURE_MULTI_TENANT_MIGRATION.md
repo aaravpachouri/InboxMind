@@ -24,6 +24,12 @@ Status: **not deployable yet**. This repository's current backend is a single-in
 - The local-only host guard rejects public Render hostnames, while simply removing it would expose a shared, single-user backend.
 - The frontend defaults to `http://127.0.0.1:8000/api/v1`; it must use the deployed API URL and a cookie-based authenticated request flow.
 
+## Render infrastructure scaffold
+
+`render.yaml` defines an API service and private-ingress Postgres database in Singapore on the feature branch. It is intentionally not deployed or applied. The service sets `APP_ENV=production`, and the backend's production startup guard causes it to fail closed until the actual tenant-isolation implementation is finished. The Postgres Basic 256 MB plan may incur charges if/when applied. The OAuth secrets and encryption key are dashboard-only placeholders.
+
+Do not apply the Blueprint yet. Creating an unused paid database or a public but intentionally nonfunctional API is not a production deployment.
+
 ## Release gates
 
 Do not create or deploy a public Render backend until all gates pass:
