@@ -177,6 +177,7 @@ async def google_callback(code: str = "", state: str = "", error: str = "") -> R
             """INSERT INTO user_sessions(user_id,session_token_hash,csrf_token_hash,expires_at)
                VALUES (%s,%s,%s,%s)""", (user["id"], _hash(session_token), _hash(csrf), expires),
         )
+        _set_user_context(conn, str(user["id"]))
         conn.execute(
             """INSERT INTO gmail_accounts(user_id,google_account_sub,email,granted_scopes,
                       refresh_token_ciphertext,access_token_ciphertext,access_token_expires_at)
