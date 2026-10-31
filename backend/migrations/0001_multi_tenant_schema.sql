@@ -156,4 +156,20 @@ CREATE POLICY user_sync_state_tenant_isolation ON user_sync_state
     USING (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)
     WITH CHECK (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
 
+
+-- Apply the same tenant boundary to the account/credential table. FORCE also protects
+-- against accidental use of the table owner role by the application.
+ALTER TABLE gmail_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE gmail_accounts FORCE ROW LEVEL SECURITY;
+ALTER TABLE user_settings FORCE ROW LEVEL SECURITY;
+ALTER TABLE user_emails FORCE ROW LEVEL SECURITY;
+ALTER TABLE user_tasks FORCE ROW LEVEL SECURITY;
+ALTER TABLE user_drafts FORCE ROW LEVEL SECURITY;
+ALTER TABLE user_sync_state FORCE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS gmail_accounts_tenant_isolation ON gmail_accounts;
+CREATE POLICY gmail_accounts_tenant_isolation ON gmail_accounts
+    USING (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid)
+    WITH CHECK (user_id = NULLIF(current_setting('app.current_user_id', true), '')::uuid);
+
 COMMIT;
