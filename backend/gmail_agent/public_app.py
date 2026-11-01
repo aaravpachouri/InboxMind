@@ -361,6 +361,182 @@ async def list_emails(
     }
 
 
+class EmailActionRequest(BaseModel):
+    confirmed: bool = False
+
+
+class LabelModifyRequest(BaseModel):
+    add_labels: list[str] = Field(default_factory=list)
+    remove_labels: list[str] = Field(default_factory=list)
+
+
+class CreateLabelRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=225)
+
+
+@app.get("/api/v1/emails/{message_id}")
+async def get_email(
+    message_id: str,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "get_email", {"message_id": message_id})
+    if not isinstance(result, dict):
+        raise HTTPException(502, "Apps Script bridge returned an invalid email.")
+    return result
+
+
+@app.get("/api/v1/emails/{message_id}/thread")
+async def get_email_thread(
+    message_id: str,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = _get_user_bridge(user)
+    email = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "get_email", {"message_id": message_id})
+    thread_id = email.get("thread_id") or email.get("threadId") if isinstance(email, dict) else None
+    if not thread_id:
+        raise HTTPException(502, "Email did not contain a thread identifier.")
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "get_thread", {"thread_id": thread_id})
+    return {"items": result if isinstance(result, list) else []}
+
+
+@app.get("/api/v1/labels")
+async def list_labels(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "list_labels")
+    return {"items": result if isinstance(result, list) else []}
+
+
+@app.post("/api/v1/labels")
+async def create_label(
+    body: CreateLabelRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge = _get_user_bridge(user)
+    return await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "create_label", {"name": body.name.strip()})
+
+
+@app.post("/api/v1/emails/{message_id}/labels")
+async def modify_email_labels(
+    message_id: str,
+    body: LabelModifyRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge = _get_user_bridge(user)
+    return await _bridge_request(
+        bridge["bridge_url"], bridge["bridge_secret"], "modify_labels",
+        {"message_id": message_id, "add_labels": body.add_labels, "remove_labels": body.remove_labels},
+    )
+
+
+async def _email_action(
+    message_id: str, action: str, confirmed: bool = False,
+    session: str | None = None,
+) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = _get_user_bridge(user)
+    params: dict[str, Any] = {"message_id": message_id}
+    if action == "trash":
+        if not confirmed:
+            raise HTTPException(400, "Confirm moving this email to Trash before continuing.")
+        params["confirmed"] = True
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], action, params)
+    return result if isinstance(result, dict) else {"ok": True, "result": result}
+
+
+@app.post("/api/v1/emails/{message_id}/archive")
+async def archive_email(
+    message_id: str, request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "archive", {"message_id": message_id})
+    return result if isinstance(result, dict) else {"ok": True}
+
+
+@app.post("/api/v1/emails/{message_id}/trash")
+async def trash_email(
+    message_id: str, body: EmailActionRequest, request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    if not body.confirmed:
+        raise HTTPException(400, "Confirm moving this email to Trash before continuing.")
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "trash", {"message_id": message_id, "confirmed": True})
+    return result if isinstance(result, dict) else {"ok": True}
+
+
+@app.post("/api/v1/emails/{message_id}/mark-read")
+async def mark_email_read(
+    message_id: str, request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "mark_read", {"message_id": message_id})
+    return result if isinstance(result, dict) else {"ok": True}
+
+
+@app.post("/api/v1/emails/{message_id}/mark-unread")
+async def mark_email_unread(
+    message_id: str, request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "mark_unread", {"message_id": message_id})
+    return result if isinstance(result, dict) else {"ok": True}
+
+
+@app.get("/api/v1/calendar/events")
+async def list_calendar_events(
+    days: int = Query(default=14, ge=1, le=90),
+    limit: int = Query(default=30, ge=1, le=50),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = _get_user_bridge(user)
+    now = datetime.now(timezone.utc)
+    result = await _bridge_request(
+        bridge["bridge_url"], bridge["bridge_secret"], "list_calendar_events",
+        {"time_min": now.isoformat(), "time_max": (now + timedelta(days=days)).isoformat(), "max_results": limit},
+    )
+    return {"items": result if isinstance(result, list) else []}
+
+
+@app.post("/api/v1/calendar/events")
+async def create_calendar_event(
+    body: dict[str, Any], request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    if not body.get("summary") or not body.get("start") or not body.get("end"):
+        raise HTTPException(422, "Event summary, start and end are required.")
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(
+        bridge["bridge_url"], bridge["bridge_secret"], "create_calendar_event",
+        {"summary": str(body["summary"])[:250], "description": str(body.get("description", ""))[:5000],
+         "start": body["start"], "end": body["end"], "attendees": body.get("attendees", []), "confirmed": True},
+    )
+    return result if isinstance(result, dict) else {"ok": True, "result": result}
+
+
 @app.get("/")
 def root() -> dict[str, str]:
     return {"service": "InboxMind Secure API", "health": "/api/v1/health", "docs": "/docs"}
