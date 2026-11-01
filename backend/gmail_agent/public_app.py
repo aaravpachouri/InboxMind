@@ -341,13 +341,20 @@ def revoke_apps_script_bridge(
 @app.get("/api/v1/gmail/emails")
 async def list_emails(
     limit: int = Query(default=25, ge=1, le=100),
+    query: str = Query(default="in:inbox", max_length=500),
+    page_token: str | None = Query(default=None, max_length=500),
+    offset: int = Query(default=0, ge=0),
+    live: bool = Query(default=True),
     session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> dict[str, Any]:
     user = _current_user(session)
     bridge = _get_user_bridge(user)
+    # Apps Script currently caps each page at 10 messages; pass through the user's
+    # search and page token instead of silently forcing every request to the inbox.
     result = await _bridge_request(
         bridge["bridge_url"], bridge["bridge_secret"], "list_emails",
-        {"max_results": min(limit, 10), "query": "in:inbox", "page_token": "0"},
+        {"max_results": min(limit, 10), "query": query or "in:inbox",
+         "page_token": page_token or str(offset // min(limit, 10)) if offset else (page_token or "0")},
     )
     if not isinstance(result, dict) or not isinstance(result.get("items", []), list):
         raise HTTPException(502, "Apps Script bridge returned an invalid email page.")
