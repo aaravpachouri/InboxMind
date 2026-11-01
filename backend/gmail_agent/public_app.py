@@ -5,6 +5,9 @@ import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
+
+from pydantic import BaseModel, Field
 from urllib.parse import urlencode
 
 import httpx
@@ -15,8 +18,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2 import id_token
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -31,9 +32,6 @@ SESSION_COOKIE = "__Host-inboxmind_session"
 SESSION_TTL = timedelta(days=7)
 SCOPES = [
     "openid", "email", "profile",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/gmail.send",
 ]
 app = FastAPI(title="InboxMind Secure API", version="1.0.0")
 app.add_middleware(
@@ -157,11 +155,6 @@ async def google_callback(code: str = "", state: str = "", error: str = "") -> R
         raise HTTPException(401, "Google identity token could not be verified.") from None
     if not claims.get("email") or claims.get("email_verified") is not True or not claims.get("sub"):
         raise HTTPException(403, "A verified Google email is required.")
-    if not tokens.get("refresh_token"):
-        raise HTTPException(502, "Google did not return a refresh token. Revoke InboxMind access in Google Account settings and sign in again.")
-    cipher = _fernet()
-    refresh_ciphertext = cipher.encrypt(tokens["refresh_token"].encode())
-    access_ciphertext = cipher.encrypt(tokens["access_token"].encode()) if tokens.get("access_token") else None
     csrf = secrets.token_urlsafe(32)
     session_token = secrets.token_urlsafe(48)
     expires = datetime.now(timezone.utc) + SESSION_TTL
@@ -177,20 +170,6 @@ async def google_callback(code: str = "", state: str = "", error: str = "") -> R
         conn.execute(
             """INSERT INTO user_sessions(user_id,session_token_hash,csrf_token_hash,expires_at)
                VALUES (%s,%s,%s,%s)""", (user["id"], _hash(session_token), _hash(csrf), expires),
-        )
-        _set_user_context(conn, str(user["id"]))
-        conn.execute(
-            """INSERT INTO gmail_accounts(user_id,google_account_sub,email,granted_scopes,
-                      refresh_token_ciphertext,access_token_ciphertext,access_token_expires_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT(user_id,google_account_sub) DO UPDATE SET
-                 email=EXCLUDED.email,granted_scopes=EXCLUDED.granted_scopes,
-                 refresh_token_ciphertext=EXCLUDED.refresh_token_ciphertext,
-                 access_token_ciphertext=EXCLUDED.access_token_ciphertext,
-                 access_token_expires_at=EXCLUDED.access_token_expires_at,revoked_at=NULL""",
-            (user["id"], claims["sub"], claims["email"], tokens.get("scope", "").split(),
-             refresh_ciphertext, access_ciphertext,
-             datetime.now(timezone.utc) + timedelta(seconds=int(tokens.get("expires_in", 3600)))),
         )
     response = RedirectResponse(FRONTEND_URL + "/?signed_in=1", status_code=302)
     response.set_cookie(SESSION_COOKIE, session_token, httponly=True, secure=True, samesite="lax",
@@ -210,7 +189,7 @@ def auth_status(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)
         if exc.status_code == 401:
             return {"connected": False, "email": None, "message": "Session expired. Sign in again."}
         raise
-    return {"connected": True, "email": user["email"], "message": "Gmail connected through Google OAuth."}
+    return {"connected": True, "email": user["email"], "message": "Identity signed in; connect your personal Apps Script bridge to access Gmail."}
 
 
 @app.get("/api/v1/auth/me")
@@ -233,56 +212,141 @@ def logout(request: Request, response: Response,
     return {"ok": True}
 
 
-@app.get("/api/v1/emails")
-@app.get("/api/v1/gmail/emails")
-def list_emails(limit: int = Query(default=25, ge=1, le=100),
-                session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
-    user = _current_user(session)
+class BridgeConnectRequest(BaseModel):
+    bridge_url: str = Field(min_length=1, max_length=500)
+    bridge_secret: str = Field(min_length=32, max_length=500)
+
+
+def _validate_bridge_url(value: str) -> str:
+    parsed = urlparse(value)
+    if (parsed.scheme != "https" or parsed.hostname != "script.google.com"
+            or not parsed.path.startswith("/macros/s/") or not parsed.path.endswith("/exec")
+            or parsed.query or parsed.fragment or parsed.username or parsed.password):
+        raise HTTPException(422, "Use the HTTPS Apps Script web-app /exec URL from your own deployment.")
+    return value
+
+
+async def _bridge_request(url: str, secret: str, action: str, params: dict[str, Any] | None = None) -> Any:
+    try:
+        async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
+            response = await client.post(url, json={"secret": secret, "action": action, "params": params or {}})
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(502, "Apps Script bridge could not be reached. Check the deployment URL and access settings.") from None
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        error = payload.get("error", "Bridge returned an invalid response.") if isinstance(payload, dict) else "Bridge returned an invalid response."
+        raise HTTPException(502, str(error)[:250])
+    return payload.get("result")
+
+
+def _get_user_bridge(user: dict[str, Any]) -> dict[str, Any]:
     pool = _pool_or_503()
     with pool.connection() as conn:
         _set_user_context(conn, str(user["id"]))
-        account = conn.execute(
-            """SELECT id,email,refresh_token_ciphertext,access_token_ciphertext,access_token_expires_at
-               FROM gmail_accounts WHERE user_id=%s AND revoked_at IS NULL ORDER BY connected_at DESC LIMIT 1""",
+        row = conn.execute(
+            """SELECT id, google_account_email, bridge_url, bridge_secret_ciphertext
+               FROM user_apps_script_bridges
+               WHERE user_id=%s AND revoked_at IS NULL
+               ORDER BY updated_at DESC LIMIT 1""",
             (user["id"],),
         ).fetchone()
-    if not account:
-        raise HTTPException(409, "Connect your Gmail account first.")
-    cipher = _fernet()
+    if not row:
+        raise HTTPException(409, "Connect your personal Apps Script bridge first.")
     try:
-        refresh = cipher.decrypt(bytes(account["refresh_token_ciphertext"])).decode()
-        access = cipher.decrypt(bytes(account["access_token_ciphertext"])).decode() if account["access_token_ciphertext"] else None
+        secret = _fernet().decrypt(bytes(row["bridge_secret_ciphertext"])).decode()
     except (InvalidToken, ValueError):
-        raise HTTPException(503, "Stored Gmail credentials could not be decrypted; contact support.") from None
-    creds = Credentials(token=access, refresh_token=refresh, token_uri="https://oauth2.googleapis.com/token",
-                        client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET, scopes=SCOPES)
+        raise HTTPException(503, "Saved Apps Script bridge credentials could not be decrypted.") from None
+    return {**row, "bridge_secret": secret}
+
+
+@app.post("/api/v1/apps-script/connect")
+async def connect_apps_script_bridge(
+    body: BridgeConnectRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge_url = _validate_bridge_url(body.bridge_url.strip())
+    profile = await _bridge_request(bridge_url, body.bridge_secret, "profile")
+    email = str(profile.get("email", "")).strip().lower() if isinstance(profile, dict) else ""
+    if not email:
+        raise HTTPException(502, "Bridge did not return a verified Gmail profile.")
+    pool = _pool_or_503()
+    encrypted_secret = _fernet().encrypt(body.bridge_secret.encode())
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        conn.execute(
+            """INSERT INTO user_apps_script_bridges
+                 (user_id, google_account_email, bridge_url, bridge_secret_ciphertext, updated_at, revoked_at)
+               VALUES (%s,%s,%s,%s,now(),NULL)
+               ON CONFLICT(user_id, google_account_email) DO UPDATE SET
+                 bridge_url=EXCLUDED.bridge_url,
+                 bridge_secret_ciphertext=EXCLUDED.bridge_secret_ciphertext,
+                 updated_at=now(), revoked_at=NULL""",
+            (user["id"], email, bridge_url, encrypted_secret),
+        )
+    return {"connected": True, "email": email, "message": "Personal Apps Script bridge connected."}
+
+
+@app.get("/api/v1/apps-script/status")
+async def apps_script_status(
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
     try:
-        if not creds.valid:
-            creds.refresh(GoogleRequest())
-            with pool.connection() as conn, conn.transaction():
-                _set_user_context(conn, str(user["id"]))
-                conn.execute("""UPDATE gmail_accounts SET access_token_ciphertext=%s,
-                              access_token_expires_at=%s WHERE user_id=%s AND id=%s""",
-                             (cipher.encrypt(creds.token.encode()), creds.expiry, user["id"], account["id"]))
-        gmail = build("gmail", "v1", credentials=creds, cache_discovery=False)
-        result = gmail.users().messages().list(userId="me", maxResults=limit, labelIds=["INBOX"]).execute()
-        messages = []
-        for item in result.get("messages", []):
-            msg = gmail.users().messages().get(userId="me", id=item["id"], format="metadata",
-                    metadataHeaders=["From", "To", "Subject", "Date"]).execute()
-            headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
-            messages.append({"id": msg["id"], "thread_id": msg.get("threadId", ""),
-                             "from_address": headers.get("from", ""), "to_addresses": headers.get("to", ""),
-                             "subject": headers.get("subject", "(no subject)"), "snippet": msg.get("snippet", ""),
-                             "internal_date": msg.get("internalDate", ""),
-                             "labels": msg.get("labelIds", []), "is_unread": "UNREAD" in msg.get("labelIds", []),
-                             "is_sent": "SENT" in msg.get("labelIds", []),
-                             "has_attachments": any(p.get("filename") for p in msg.get("payload", {}).get("parts", []))})
-        return {"items": messages, "total": len(messages), "total_estimate": len(messages), "next_page_token": None, "source": "gmail", "account_email": account["email"]}
-    except HTTPException:
+        bridge = _get_user_bridge(user)
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            return {"connected": False, "email": None, "message": str(exc.detail)}
         raise
-    except Exception as exc:
-        raise HTTPException(502, f"Gmail request failed ({type(exc).__name__}).") from None
+    profile = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "profile")
+    email = str(profile.get("email", "")).strip().lower() if isinstance(profile, dict) else ""
+    if email != str(bridge["google_account_email"]).lower():
+        raise HTTPException(502, "Apps Script mailbox identity changed. Reconnect the bridge.")
+    return {"connected": True, "email": email, "message": "Gmail connected through your Apps Script deployment."}
+
+
+@app.post("/api/v1/apps-script/revoke")
+def revoke_apps_script_bridge(
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, bool]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        conn.execute(
+            "UPDATE user_apps_script_bridges SET revoked_at=now(), updated_at=now() WHERE user_id=%s AND revoked_at IS NULL",
+            (user["id"],),
+        )
+    return {"ok": True}
+
+
+@app.get("/api/v1/emails")
+@app.get("/api/v1/gmail/emails")
+async def list_emails(
+    limit: int = Query(default=25, ge=1, le=100),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(
+        bridge["bridge_url"], bridge["bridge_secret"], "list_emails",
+        {"max_results": min(limit, 10), "query": "in:inbox", "page_token": "0"},
+    )
+    if not isinstance(result, dict) or not isinstance(result.get("items", []), list):
+        raise HTTPException(502, "Apps Script bridge returned an invalid email page.")
+    return {
+        "items": result.get("items", []),
+        "total": result.get("total_estimate", len(result.get("items", []))),
+        "total_estimate": result.get("total_estimate", len(result.get("items", []))),
+        "next_page_token": result.get("next_page_token"),
+        "source": "apps_script",
+        "account_email": bridge["google_account_email"],
+    }
 
 
 @app.get("/")
