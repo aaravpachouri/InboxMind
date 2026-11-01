@@ -48,3 +48,29 @@ def test_email_endpoint_uses_apps_script_bridge_not_direct_gmail_api() -> None:
     assert "_get_user_bridge(user)" in source
     assert "googleapiclient" not in source
     assert "Credentials(" not in source
+
+
+
+def test_per_user_bridge_read_keeps_rls_context_inside_transaction() -> None:
+    source = inspect.getsource(public_app._get_user_bridge)
+    assert "with pool.connection() as conn, conn.transaction():" in source
+    assert source.index("_set_user_context") < source.index("FROM user_apps_script_bridges")
+
+
+def test_apps_script_backed_email_and_calendar_routes_are_registered() -> None:
+    routes = {(route.path, tuple(sorted(route.methods or []))) for route in public_app.app.routes}
+    expected = {
+        ("/api/v1/emails/{message_id}", ("GET",)),
+        ("/api/v1/emails/{message_id}/archive", ("POST",)),
+        ("/api/v1/emails/{message_id}/trash", ("POST",)),
+        ("/api/v1/emails/{message_id}/mark-read", ("POST",)),
+        ("/api/v1/emails/{message_id}/mark-unread", ("POST",)),
+        ("/api/v1/labels", ("GET",)),
+        ("/api/v1/calendar/events", ("GET",)),
+    }
+    assert expected.issubset(routes)
+
+
+def test_email_list_accepts_search_and_pagination_parameters() -> None:
+    signature = inspect.signature(public_app.list_emails)
+    assert {"query", "page_token", "offset", "live"}.issubset(signature.parameters)
