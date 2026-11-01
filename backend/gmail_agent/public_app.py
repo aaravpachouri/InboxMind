@@ -180,16 +180,26 @@ async def google_callback(code: str = "", state: str = "", error: str = "") -> R
 
 
 @app.get("/api/v1/auth/status")
-def auth_status(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+async def auth_status(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     if not session:
-        return {"connected": False, "email": None, "message": "Sign in with Google to connect your Gmail account."}
+        return {"connected": False, "email": None, "message": "Sign in to connect your personal Apps Script bridge."}
     try:
         user = _current_user(session)
     except HTTPException as exc:
         if exc.status_code == 401:
             return {"connected": False, "email": None, "message": "Session expired. Sign in again."}
         raise
-    return {"connected": True, "email": user["email"], "message": "Identity signed in; connect your personal Apps Script bridge to access Gmail."}
+    try:
+        bridge = _get_user_bridge(user)
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            return {"connected": False, "email": None, "message": "Signed in. Connect your personal Apps Script bridge to access Gmail."}
+        raise
+    profile = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "profile")
+    email = str(profile.get("email", "")).strip().lower() if isinstance(profile, dict) else ""
+    if email != str(bridge["google_account_email"]).lower():
+        raise HTTPException(502, "Apps Script mailbox identity changed. Reconnect the bridge.")
+    return {"connected": True, "email": email, "message": "Gmail connected through your personal Apps Script deployment."}
 
 
 @app.get("/api/v1/auth/me")
