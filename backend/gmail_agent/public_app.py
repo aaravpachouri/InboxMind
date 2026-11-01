@@ -369,7 +369,7 @@ async def list_emails(
 
 
 class EmailActionRequest(BaseModel):
-    confirmed: bool = False
+    confirm: bool = False
 
 
 class LabelModifyRequest(BaseModel):
@@ -479,7 +479,7 @@ async def trash_email(
 ) -> dict[str, Any]:
     user = _current_user(session)
     _require_csrf(request, user)
-    if not body.confirmed:
+    if not body.confirm:
         raise HTTPException(400, "Confirm moving this email to Trash before continuing.")
     bridge = _get_user_bridge(user)
     result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "trash", {"message_id": message_id, "confirmed": True})
