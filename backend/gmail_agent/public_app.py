@@ -52,11 +52,11 @@ def _pool_or_503() -> ConnectionPool:
 
 def _fernet() -> Fernet:
     if not APP_ENCRYPTION_KEY:
-        raise HTTPException(503, "APP_ENCRYPTION_KEY is not configured; Gmail credentials are not available.")
+        raise HTTPException(503, "APP_ENCRYPTION_KEY is not configured; Apps Script bridge secrets cannot be stored safely.")
     try:
         return Fernet(APP_ENCRYPTION_KEY.encode())
     except (ValueError, TypeError):
-        raise HTTPException(503, "APP_ENCRYPTION_KEY must be a valid Fernet key.") from None
+        raise HTTPException(503, "APP_ENCRYPTION_KEY must be a valid Fernet key to encrypt Apps Script bridge secrets.") from None
 
 
 def _hash(value: str) -> bytes:
