@@ -252,7 +252,9 @@ async def _bridge_request(url: str, secret: str, action: str, params: dict[str, 
 
 def _get_user_bridge(user: dict[str, Any]) -> dict[str, Any]:
     pool = _pool_or_503()
-    with pool.connection() as conn:
+    # RLS context is transaction-local (set_config(..., true)); keep it and
+    # the protected query inside the same transaction.
+    with pool.connection() as conn, conn.transaction():
         _set_user_context(conn, str(user["id"]))
         row = conn.execute(
             """SELECT id, google_account_email, bridge_url, bridge_secret_ciphertext
