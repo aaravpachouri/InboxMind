@@ -74,3 +74,28 @@ def test_apps_script_backed_email_and_calendar_routes_are_registered() -> None:
 def test_email_list_accepts_search_and_pagination_parameters() -> None:
     signature = inspect.signature(public_app.list_emails)
     assert {"query", "page_token", "offset", "live"}.issubset(signature.parameters)
+
+
+
+def test_hosted_core_routes_cover_frontend_persistence_operations() -> None:
+    routes = {(route.path, tuple(sorted(route.methods or []))) for route in public_app.app.routes}
+    expected = {
+        ("/api/v1/drafts/{draft_id}/send", ("POST",)),
+        ("/api/v1/drafts/{draft_id}", ("DELETE",)),
+        ("/api/v1/memory", ("GET",)),
+        ("/api/v1/memory", ("POST",)),
+        ("/api/v1/memory/{memory_id}", ("DELETE",)),
+        ("/api/v1/feedback", ("GET",)),
+        ("/api/v1/feedback", ("POST",)),
+        ("/api/v1/sync", ("POST",)),
+        ("/api/v1/briefing/daily", ("GET",)),
+        ("/api/v1/chat", ("POST",)),
+        ("/api/v1/emails/{message_id}/draft-reply", ("POST",)),
+    }
+    assert expected.issubset(routes)
+
+
+def test_unavailable_ai_endpoints_do_not_claim_fake_results() -> None:
+    source = inspect.getsource(public_app.summarize_email_unavailable)
+    assert "No summary was fabricated" in source
+    assert "status_code=503" in source
