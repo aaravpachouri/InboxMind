@@ -491,7 +491,7 @@ export default function App() {
       } while (pageToken && pages < 3);
       await loadCore(false);
       const more = pageToken ? ' · more messages remain; sync again to continue' : '';
-      notify(`Sync complete · ${fetched} fetched, ${stored} indexed${more}.`, errors.length ? 'info' : 'success');
+      notify(`Sync complete · ${fetched} fetched, ${stored} indexed${stored === 0 ? ' (live-only; persistent email indexing is not enabled yet)' : ''}${more}.`, errors.length ? 'info' : 'success');
     } catch (error) { notify(errorText(error), 'error'); }
     finally { setBusy(null); }
   };
