@@ -633,6 +633,57 @@ async def create_draft(
     return _draft_from_row(row)
 
 
+
+@app.patch("/api/v1/drafts/{draft_id}")
+async def update_draft(
+    draft_id: str,
+    body: DraftPayload,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        existing = conn.execute(
+            "SELECT id,payload,status,gmail_draft_id,created_at,updated_at FROM user_drafts WHERE user_id=%s AND id=%s",
+            (user["id"], draft_id),
+        ).fetchone()
+    if not existing:
+        raise HTTPException(404, "Draft not found.")
+    old_gmail_id = existing.get("gmail_draft_id")
+    new_gmail_id = old_gmail_id
+    bridge = _get_user_bridge(user)
+    if old_gmail_id:
+        created = await _bridge_request(
+            bridge["bridge_url"], bridge["bridge_secret"], "create_draft",
+            {"to_addresses": body.to_addresses, "cc_addresses": body.cc_addresses,
+             "bcc_addresses": body.bcc_addresses, "subject": body.subject, "body_text": body.body_text},
+        )
+        new_gmail_id = str(created.get("id") or created.get("draft_id") or "") if isinstance(created, dict) else ""
+        if not new_gmail_id:
+            raise HTTPException(502, "Gmail did not return the updated draft ID; the original draft remains unchanged.")
+    payload = {"to_addresses": body.to_addresses, "cc_addresses": body.cc_addresses,
+               "bcc_addresses": body.bcc_addresses, "subject": body.subject, "body_text": body.body_text,
+               "source_email_id": body.source_email_id}
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            """UPDATE user_drafts SET payload=%s::jsonb,gmail_draft_id=%s,updated_at=now()
+               WHERE user_id=%s AND id=%s
+               RETURNING id,payload,status,gmail_draft_id,created_at,updated_at""",
+            (json.dumps(payload), new_gmail_id, user["id"], draft_id),
+        ).fetchone()
+    if old_gmail_id and new_gmail_id and old_gmail_id != new_gmail_id:
+        try:
+            await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "delete_draft",
+                                  {"draft_id": old_gmail_id, "confirmed": True})
+        except HTTPException:
+            row["payload"]["warning"] = "Updated Gmail draft saved, but the previous Gmail draft could not be removed. Check Gmail before sending."
+    return _draft_from_row(row)
+
+
 @app.get("/")
 def root() -> dict[str, str]:
     return {"service": "InboxMind Secure API", "health": "/api/v1/health", "docs": "/docs"}
