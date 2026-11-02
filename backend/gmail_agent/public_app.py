@@ -684,6 +684,180 @@ async def update_draft(
     return _draft_from_row(row)
 
 
+
+class TaskCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    description: str = Field(default="", max_length=5000)
+    priority: str = Field(default="medium", pattern="^(low|medium|high|urgent)$")
+    due_date: str | None = None
+    source_email_id: str | None = None
+
+
+class TaskUpdateRequest(BaseModel):
+    status: str | None = Field(default=None, pattern="^(open|in_progress|done|dismissed)$")
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    description: str | None = Field(default=None, max_length=5000)
+    priority: str | None = Field(default=None, pattern="^(low|medium|high|urgent)$")
+    due_date: str | None = None
+
+
+def _task_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]), "title": row["title"], "description": row.get("description", ""),
+        "due_date": row.get("due_at"), "priority": row.get("priority", "medium"),
+        "status": row.get("status", "open"), "source_email_id": row.get("source_message_id"),
+        "created_at": row.get("created_at"),
+    }
+
+
+@app.get("/api/v1/tasks")
+def list_tasks(
+    status: str = Query(default="open", max_length=30),
+    limit: int = Query(default=200, ge=1, le=500),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        if status == "all":
+            rows = conn.execute(
+                "SELECT id,title,description,due_at,priority,status,source_message_id,created_at FROM user_tasks WHERE user_id=%s ORDER BY created_at DESC LIMIT %s",
+                (user["id"], limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id,title,description,due_at,priority,status,source_message_id,created_at FROM user_tasks WHERE user_id=%s AND status=%s ORDER BY created_at DESC LIMIT %s",
+                (user["id"], status, limit),
+            ).fetchall()
+    return {"items": [_task_from_row(row) for row in rows]}
+
+
+@app.post("/api/v1/tasks")
+def create_task(
+    body: TaskCreateRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    due_at = body.due_date
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            """INSERT INTO user_tasks(user_id,source_message_id,title,description,due_at,priority,status)
+               VALUES (%s,%s,%s,%s,%s,%s,'open')
+               RETURNING id,title,description,due_at,priority,status,source_message_id,created_at""",
+            (user["id"], body.source_email_id, body.title.strip(), body.description, due_at, body.priority),
+        ).fetchone()
+    return _task_from_row(row)
+
+
+@app.patch("/api/v1/tasks/{task_id}")
+def update_task(
+    task_id: str,
+    body: TaskUpdateRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    changes = body.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(422, "Provide at least one task field to update.")
+    allowed = {"status": "status", "title": "title", "description": "description", "priority": "priority", "due_date": "due_at"}
+    sets = []
+    values: list[Any] = []
+    for key, value in changes.items():
+        column = allowed[key]
+        sets.append(f"{column}=%s")
+        values.append(value)
+    sets.append("updated_at=now()")
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            f"UPDATE user_tasks SET {', '.join(sets)} WHERE user_id=%s AND id=%s "
+            "RETURNING id,title,description,due_at,priority,status,source_message_id,created_at",
+            (*values, user["id"], task_id),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Task not found.")
+    return _task_from_row(row)
+
+
+@app.get("/api/v1/settings")
+def get_user_settings(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+    user = _current_user(session)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute("SELECT settings FROM user_settings WHERE user_id=%s", (user["id"],)).fetchone()
+    return row["settings"] if row and isinstance(row.get("settings"), dict) else {
+        "ai_enabled": False, "auto_sync_enabled": False, "ai_provider": "unavailable",
+        "note": "Hosted AI and automatic sync are disabled until explicitly configured.",
+    }
+
+
+@app.patch("/api/v1/settings")
+def update_user_settings(
+    body: dict[str, Any],
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    allowed = {"ai_enabled", "auto_sync_enabled", "sync_interval_seconds", "sync_window_days", "ollama_model"}
+    if not body or set(body) - allowed:
+        raise HTTPException(422, "Unsupported or empty settings update.")
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            """INSERT INTO user_settings(user_id,settings,updated_at) VALUES (%s,%s::jsonb,now())
+               ON CONFLICT(user_id) DO UPDATE SET settings=user_settings.settings || EXCLUDED.settings,updated_at=now()
+               RETURNING settings""",
+            (user["id"], json.dumps(body)),
+        ).fetchone()
+    return {"saved": True, "settings": row["settings"]}
+
+
+@app.get("/api/v1/system/model")
+def hosted_model_status(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+    _current_user(session)
+    return {"available": False, "provider": "unavailable", "model": None,
+            "detail": "The hosted API has no local Ollama process. AI drafting and chat need a configured provider."}
+
+
+@app.get("/api/v1/insights")
+async def user_insights(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = None
+    try:
+        bridge = _get_user_bridge(user)
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+    task_pool = _pool_or_503()
+    with task_pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        counts = conn.execute(
+            "SELECT COUNT(*) FILTER (WHERE status IN ('open','in_progress')) AS open_count, "
+            "COUNT(*) FILTER (WHERE status='open' AND due_at < now()) AS overdue_count FROM user_tasks WHERE user_id=%s",
+            (user["id"],),
+        ).fetchone()
+    profile = {}
+    if bridge:
+        profile = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "profile")
+    return {
+        "connected": bool(bridge), "email_count": int(profile.get("messages_total", 0)) if isinstance(profile, dict) else 0,
+        "unread_count": 0, "high_priority_count": 0, "open_tasks_count": int(counts["open_count"] or 0),
+        "overdue_tasks_count": int(counts["overdue_count"] or 0), "category_counts": {},
+        "recent_activity": [], "model_available": False,
+    }
+
+
 @app.get("/")
 def root() -> dict[str, str]:
     return {"service": "InboxMind Secure API", "health": "/api/v1/health", "docs": "/docs"}
