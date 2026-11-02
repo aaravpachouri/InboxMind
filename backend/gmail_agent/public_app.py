@@ -105,6 +105,59 @@ def health() -> dict[str, str]:
     return {"status": "ok", "service": "inboxmind-secure-api"}
 
 
+
+@app.post("/api/v1/apps-script/login")
+async def apps_script_login(
+    body: BridgeConnectRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    """Authenticate by possession of the user's own secret-protected Apps Script bridge.
+
+    Gmail authorization remains inside that user's Apps Script deployment; this route
+    does not request Gmail OAuth scopes or accept a shared global bridge.
+    """
+    bridge_url = _validate_bridge_url(body.bridge_url.strip())
+    profile = await _bridge_request(bridge_url, body.bridge_secret, "profile")
+    email = str(profile.get("email", "")).strip().lower() if isinstance(profile, dict) else ""
+    if not email or "@" not in email:
+        raise HTTPException(502, "Apps Script did not return a valid mailbox identity.")
+    _fernet()
+    pool = _pool_or_503()
+    account_key = "apps-script:" + email
+    csrf = secrets.token_urlsafe(32)
+    session_token = secrets.token_urlsafe(48)
+    expires = datetime.now(timezone.utc) + SESSION_TTL
+    encrypted_secret = _fernet().encrypt(body.bridge_secret.encode())
+    with pool.connection() as conn, conn.transaction():
+        user = conn.execute(
+            """INSERT INTO app_users(google_sub,email,email_verified,display_name,picture_url)
+               VALUES (%s,%s,true,%s,'')
+               ON CONFLICT(google_sub) DO UPDATE SET email=EXCLUDED.email,email_verified=true,updated_at=now()
+               RETURNING id,email,display_name,picture_url""",
+            (account_key, email, email.split("@")[0]),
+        ).fetchone()
+        _set_user_context(conn, str(user["id"]))
+        conn.execute(
+            """INSERT INTO user_apps_script_bridges
+                 (user_id,google_account_email,bridge_url,bridge_secret_ciphertext,updated_at,revoked_at)
+               VALUES (%s,%s,%s,%s,now(),NULL)
+               ON CONFLICT(user_id,google_account_email) DO UPDATE SET
+                 bridge_url=EXCLUDED.bridge_url,bridge_secret_ciphertext=EXCLUDED.bridge_secret_ciphertext,
+                 updated_at=now(),revoked_at=NULL""",
+            (user["id"], email, bridge_url, encrypted_secret),
+        )
+        conn.execute(
+            "INSERT INTO user_sessions(user_id,session_token_hash,csrf_token_hash,expires_at) VALUES (%s,%s,%s,%s)",
+            (user["id"], _hash(session_token), _hash(csrf), expires),
+        )
+    response.set_cookie(SESSION_COOKIE, session_token, httponly=True, secure=True, samesite="lax",
+                        max_age=int(SESSION_TTL.total_seconds()), path="/")
+    response.set_cookie("inboxmind_csrf", csrf, httponly=False, secure=True, samesite="lax",
+                        max_age=int(SESSION_TTL.total_seconds()), path="/")
+    return {"connected": True, "email": email, "message": "Signed in using your personal Apps Script bridge."}
+
+
 @app.get("/api/v1/auth/google/login")
 def google_login() -> RedirectResponse:
     _check_oauth_config()
