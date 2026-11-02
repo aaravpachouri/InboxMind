@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -542,6 +543,94 @@ async def create_calendar_event(
          "start": body["start"], "end": body["end"], "attendees": body.get("attendees", []), "confirmed": True},
     )
     return result if isinstance(result, dict) else {"ok": True, "result": result}
+
+
+
+class DraftPayload(BaseModel):
+    to_addresses: list[str] = Field(default_factory=list, max_length=50)
+    cc_addresses: list[str] = Field(default_factory=list, max_length=50)
+    bcc_addresses: list[str] = Field(default_factory=list, max_length=50)
+    subject: str = Field(default="", max_length=998)
+    body_text: str = Field(default="", max_length=100000)
+    source_email_id: str | None = None
+    create_in_gmail: bool = True
+
+
+def _draft_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    payload = row.get("payload") or {}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            payload = {}
+    return {
+        "id": str(row["id"]), "to_addresses": payload.get("to_addresses", []),
+        "cc_addresses": payload.get("cc_addresses", []), "bcc_addresses": payload.get("bcc_addresses", []),
+        "subject": payload.get("subject", ""), "body_text": payload.get("body_text", ""),
+        "status": row.get("status", "draft"), "source_email_id": payload.get("source_email_id"),
+        "gmail_draft_id": row.get("gmail_draft_id"), "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"), "sent_at": payload.get("sent_at"),
+        "ai_provider": payload.get("ai_provider"), "warning": payload.get("warning"),
+    }
+
+
+@app.get("/api/v1/drafts")
+def list_drafts(
+    status: str = Query(default="draft", max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        if status == "all":
+            rows = conn.execute(
+                "SELECT id,payload,status,gmail_draft_id,created_at,updated_at FROM user_drafts WHERE user_id=%s ORDER BY updated_at DESC LIMIT %s",
+                (user["id"], limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id,payload,status,gmail_draft_id,created_at,updated_at FROM user_drafts WHERE user_id=%s AND status=%s ORDER BY updated_at DESC LIMIT %s",
+                (user["id"], status, limit),
+            ).fetchall()
+    return {"items": [_draft_from_row(row) for row in rows]}
+
+
+@app.post("/api/v1/drafts")
+async def create_draft(
+    body: DraftPayload,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    if not body.to_addresses or any("@" not in address or len(address) > 320 for address in body.to_addresses):
+        raise HTTPException(422, "At least one valid recipient address is required.")
+    bridge = _get_user_bridge(user)
+    gmail_draft_id = None
+    if body.create_in_gmail:
+        created = await _bridge_request(
+            bridge["bridge_url"], bridge["bridge_secret"], "create_draft",
+            {"to_addresses": body.to_addresses, "cc_addresses": body.cc_addresses,
+             "bcc_addresses": body.bcc_addresses, "subject": body.subject, "body_text": body.body_text},
+        )
+        gmail_draft_id = str(created.get("id") or created.get("draft_id") or "") if isinstance(created, dict) else ""
+        if not gmail_draft_id:
+            raise HTTPException(502, "Gmail did not return a draft ID; the draft was not saved locally.")
+    payload = {"to_addresses": body.to_addresses, "cc_addresses": body.cc_addresses,
+               "bcc_addresses": body.bcc_addresses, "subject": body.subject, "body_text": body.body_text,
+               "source_email_id": body.source_email_id}
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            """INSERT INTO user_drafts(user_id,gmail_draft_id,payload,status)
+               VALUES (%s,%s,%s::jsonb,'draft')
+               RETURNING id,payload,status,gmail_draft_id,created_at,updated_at""",
+            (user["id"], gmail_draft_id, json.dumps(payload)),
+        ).fetchone()
+    return _draft_from_row(row)
 
 
 @app.get("/")
