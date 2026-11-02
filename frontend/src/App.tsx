@@ -996,7 +996,7 @@ export default function App() {
     }
     setBridgeConnecting(true);
     try {
-      const result = await api<{ connected: boolean; email: string; message: string }>('/apps-script/connect', {
+      const result = await api<{ connected: boolean; email: string; message: string }>('/apps-script/login', {
         method: 'POST',
         body: JSON.stringify({ bridge_url: bridgeUrl.trim(), bridge_secret: bridgeSecret }),
       });
@@ -1091,9 +1091,9 @@ export default function App() {
 
         {!backendOnline && !loading && <div className="connection-banner error-banner"><CircleAlert size={17} /><div><strong>Backend unavailable</strong><span>Start the Python API at <code>127.0.0.1:8000</code>, then refresh this page.</span></div><button className="text-button" onClick={() => void refreshAll()}>Retry</button></div>}
         {backendOnline && authStatusUnavailable && <div className="connection-banner status-warning-banner"><CircleAlert size={17} /><div><strong>Gmail status couldn't be verified</strong><span>The backend is responding, but its auth-status check failed. Retry before reconnecting so we don't mislabel a connected account.</span></div><button className="text-button" onClick={() => void refreshAll()}>Retry status</button></div>}
-        {backendOnline && !authStatusUnavailable && auth && !auth.connected && <div className="connection-banner"><Mail size={17} /><div><strong>Connect Gmail through Apps Script</strong><span>{auth.message || 'Sign in, then connect your personal Apps Script deployment.'}</span></div>{auth.message?.toLowerCase().startsWith('sign in') && <button className="small-primary" onClick={() => void openLogin()}>Sign in <ExternalLink size={13} /></button>}</div>}
-        {backendOnline && !authStatusUnavailable && auth && !auth.connected && auth.message?.toLowerCase().includes('signed in.') && <form className="connection-banner" onSubmit={(event) => void connectAppsScriptBridge(event)} style={{ alignItems: 'stretch', flexWrap: 'wrap' }}>
-          <div style={{ flexBasis: '100%' }}><strong>Your personal Apps Script bridge</strong><span>Deploy your own bridge as a web app, then paste its /exec URL and the BRIDGE_SECRET from Script Properties. The secret is sent over HTTPS and stored encrypted; it is never displayed back.</span></div>
+        {backendOnline && !authStatusUnavailable && auth && !auth.connected && <div className="connection-banner"><Mail size={17} /><div><strong>Connect Gmail through Apps Script</strong><span>{auth.message || 'Sign in, then connect your personal Apps Script deployment.'}</span></div>{false && auth.message?.toLowerCase().startsWith('sign in') && <button className="small-primary" onClick={() => void openLogin()}>Sign in <ExternalLink size={13} /></button>}</div>}
+        {backendOnline && !authStatusUnavailable && auth && !auth.connected && (auth.message?.toLowerCase().includes('signed in.') || auth.message?.toLowerCase().startsWith('sign in')) && <form className="connection-banner" onSubmit={(event) => void connectAppsScriptBridge(event)} style={{ alignItems: 'stretch', flexWrap: 'wrap' }}>
+          <div style={{ flexBasis: '100%' }}><strong>Your personal Apps Script bridge</strong><span>Use your own Apps Script web-app /exec URL and its BRIDGE_SECRET from Script Properties. The secret authenticates your mailbox through your personal deployment, is sent over HTTPS, and is stored encrypted.</span></div>
           <input aria-label="Apps Script web app URL" type="url" required placeholder="https://script.google.com/macros/s/.../exec" value={bridgeUrl} onChange={(event) => setBridgeUrl(event.target.value)} autoComplete="url" />
           <input aria-label="Apps Script bridge secret" type="password" required minLength={32} placeholder="Bridge secret (32+ characters)" value={bridgeSecret} onChange={(event) => setBridgeSecret(event.target.value)} autoComplete="new-password" />
           <button className="small-primary" type="submit" disabled={bridgeConnecting}>{bridgeConnecting ? 'Verifying…' : 'Verify & connect'}</button>
