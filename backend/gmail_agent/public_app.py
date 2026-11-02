@@ -911,6 +911,292 @@ async def user_insights(session: str | None = Cookie(default=None, alias=SESSION
     }
 
 
+
+class DraftSendRequest(BaseModel):
+    confirm_send: bool = False
+
+
+@app.post("/api/v1/drafts/{draft_id}/send")
+async def send_draft(
+    draft_id: str,
+    body: DraftSendRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    if not body.confirm_send:
+        raise HTTPException(400, "Explicitly confirm sending this email.")
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            "SELECT id,payload,status,gmail_draft_id FROM user_drafts WHERE user_id=%s AND id=%s",
+            (user["id"], draft_id),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Draft not found.")
+    if row["status"] != "draft":
+        raise HTTPException(409, "Only a draft can be sent.")
+    if not row.get("gmail_draft_id"):
+        raise HTTPException(409, "This item has no verified Gmail draft ID and cannot be sent.")
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(
+        bridge["bridge_url"], bridge["bridge_secret"], "send_draft",
+        {"draft_id": row["gmail_draft_id"], "confirmed": True},
+    )
+    payload = row.get("payload") or {}
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    payload["sent_at"] = datetime.now(timezone.utc).isoformat()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        updated = conn.execute(
+            """UPDATE user_drafts SET status='sent',payload=%s::jsonb,updated_at=now()
+               WHERE user_id=%s AND id=%s
+               RETURNING id,payload,status,gmail_draft_id,created_at,updated_at""",
+            (json.dumps(payload), user["id"], draft_id),
+        ).fetchone()
+    return {"ok": True, "draft": _draft_from_row(updated), "gmail_result": result}
+
+
+@app.delete("/api/v1/drafts/{draft_id}")
+async def delete_draft(
+    draft_id: str,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, bool]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            "SELECT gmail_draft_id,status FROM user_drafts WHERE user_id=%s AND id=%s",
+            (user["id"], draft_id),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Draft not found.")
+    if row.get("gmail_draft_id") and row.get("status") == "draft":
+        bridge = _get_user_bridge(user)
+        await _bridge_request(
+            bridge["bridge_url"], bridge["bridge_secret"], "delete_draft",
+            {"draft_id": row["gmail_draft_id"], "confirmed": True},
+        )
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        conn.execute("DELETE FROM user_drafts WHERE user_id=%s AND id=%s", (user["id"], draft_id))
+    return {"ok": True}
+
+
+class MemoryPayload(BaseModel):
+    category: str = Field(default="general", min_length=1, max_length=80)
+    key: str = Field(min_length=1, max_length=200)
+    value: str = Field(default="", max_length=10000)
+
+
+@app.get("/api/v1/memory")
+def list_memory(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+    user = _current_user(session)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        rows = conn.execute(
+            "SELECT id,category,key,value,created_at,updated_at FROM user_memories WHERE user_id=%s ORDER BY updated_at DESC LIMIT 500",
+            (user["id"],),
+        ).fetchall()
+    return {"items": [{**row, "id": str(row["id"])} for row in rows]}
+
+
+@app.post("/api/v1/memory")
+def create_memory(
+    body: MemoryPayload,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            """INSERT INTO user_memories(user_id,category,key,value)
+               VALUES (%s,%s,%s,%s)
+               ON CONFLICT(user_id,category,key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()
+               RETURNING id,category,key,value,created_at,updated_at""",
+            (user["id"], body.category.strip(), body.key.strip(), body.value),
+        ).fetchone()
+    return {**row, "id": str(row["id"])}
+
+
+class ConfirmRequest(BaseModel):
+    confirm: bool = False
+
+
+@app.delete("/api/v1/memory/{memory_id}")
+def delete_memory(
+    memory_id: str,
+    body: ConfirmRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, bool]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    if not body.confirm:
+        raise HTTPException(400, "Confirm deleting this memory.")
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        cur = conn.execute("DELETE FROM user_memories WHERE user_id=%s AND id=%s", (user["id"], memory_id))
+    if cur.rowcount == 0:
+        raise HTTPException(404, "Memory not found.")
+    return {"ok": True}
+
+
+class FeedbackPayload(BaseModel):
+    kind: str = Field(default="general", pattern="^(summary|priority|draft|classification|general)$")
+    feedback_text: str = Field(min_length=1, max_length=5000)
+    input_summary: str = Field(default="", max_length=5000)
+
+
+@app.get("/api/v1/feedback")
+def list_feedback(
+    limit: int = Query(default=20, ge=1, le=100),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        rows = conn.execute(
+            "SELECT id,kind,feedback_text,input_summary,created_at FROM user_feedback WHERE user_id=%s ORDER BY created_at DESC LIMIT %s",
+            (user["id"], limit),
+        ).fetchall()
+    return {"items": [{**row, "id": str(row["id"])} for row in rows]}
+
+
+@app.post("/api/v1/feedback")
+def create_feedback(
+    body: FeedbackPayload,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            """INSERT INTO user_feedback(user_id,kind,feedback_text,input_summary)
+               VALUES (%s,%s,%s,%s) RETURNING id,kind,feedback_text,input_summary,created_at""",
+            (user["id"], body.kind, body.feedback_text, body.input_summary),
+        ).fetchone()
+    return {**row, "id": str(row["id"])}
+
+
+@app.get("/api/v1/notifications")
+def list_notifications(
+    unread_only: bool = False,
+    limit: int = Query(default=50, ge=1, le=100),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    _current_user(session)
+    # Notifications are not generated by the hosted bridge yet. Return an explicit empty
+    # collection rather than inventing notifications or implying a background worker ran.
+    return {"items": [], "unread_count": 0}
+
+
+@app.post("/api/v1/sync")
+async def sync_mailbox(
+    body: dict[str, Any],
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge = _get_user_bridge(user)
+    max_results = min(max(int(body.get("max_results", 10)), 1), 10)
+    query = str(body.get("query") or "in:inbox newer_than:30d")[:500]
+    page_token = str(body.get("page_token") or "0")[:500]
+    result = await _bridge_request(
+        bridge["bridge_url"], bridge["bridge_secret"], "list_emails",
+        {"max_results": max_results, "query": query, "page_token": page_token},
+    )
+    if not isinstance(result, dict):
+        raise HTTPException(502, "Apps Script returned an invalid sync page.")
+    items = result.get("items") if isinstance(result.get("items"), list) else []
+    # This route currently fetches a bounded live page; no persistent message index or AI
+    # analysis is claimed. The response reports stored=0 until that index is implemented.
+    return {"fetched": len(items), "stored": 0, "analyzed": 0, "tasks_created": 0,
+            "errors": [], "next_page_token": result.get("next_page_token")}
+
+
+@app.get("/api/v1/briefing/daily")
+async def daily_briefing(
+    hours: int = Query(default=24, ge=1, le=168),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        tasks = conn.execute(
+            """SELECT id,title,description,due_at,priority,status,source_message_id,created_at
+               FROM user_tasks WHERE user_id=%s AND status IN ('open','in_progress')
+               AND (due_at IS NULL OR due_at <= now() + (%s * interval '1 hour'))
+               ORDER BY due_at NULLS LAST LIMIT 20""",
+            (user["id"], hours),
+        ).fetchall()
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(), "period_hours": hours,
+        "provider": "deterministic", "summary": "Briefing based on your saved tasks. AI email analysis is not enabled on the hosted backend.",
+        "counts": {"tasks_due": len(tasks)},
+        "important_emails": [], "tasks_due_today_or_overdue": [_task_from_row(row) for row in tasks],
+        "next_steps": [f"Review task: {row['title']}" for row in tasks[:5]],
+    }
+
+
+@app.post("/api/v1/emails/{message_id}/summarize")
+async def summarize_email_unavailable(
+    message_id: str,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    _current_user(session)
+    raise HTTPException(503, "Email summarization needs an AI provider configured for the hosted backend. No summary was fabricated.")
+
+
+@app.post("/api/v1/emails/{message_id}/analyze")
+async def analyze_email_unavailable(
+    message_id: str,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    _current_user(session)
+    raise HTTPException(503, "Email analysis needs an AI provider configured for the hosted backend. No analysis was fabricated.")
+
+
+@app.post("/api/v1/chat")
+async def chat_unavailable(
+    body: dict[str, Any],
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    _current_user(session)
+    raise HTTPException(503, "Chat needs an AI provider configured for the hosted backend. No placeholder answer was generated.")
+
+
+@app.post("/api/v1/emails/{message_id}/draft-reply")
+async def draft_reply_unavailable(
+    message_id: str,
+    body: dict[str, Any],
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    _current_user(session)
+    raise HTTPException(503, "AI reply drafting needs an AI provider configured for the hosted backend. No draft was created.")
+
+
 @app.get("/")
 def root() -> dict[str, str]:
     return {"service": "InboxMind Secure API", "health": "/api/v1/health", "docs": "/docs"}
