@@ -98,4 +98,4 @@ def test_hosted_core_routes_cover_frontend_persistence_operations() -> None:
 def test_unavailable_ai_endpoints_do_not_claim_fake_results() -> None:
     source = inspect.getsource(public_app.summarize_email_unavailable)
     assert "No summary was fabricated" in source
-    assert "status_code=503" in source
+    assert "HTTPException(503," in source
