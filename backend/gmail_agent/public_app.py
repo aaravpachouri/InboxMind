@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
+
+from pydantic import BaseModel, Field
 from urllib.parse import urlencode
 
 import httpx
@@ -15,8 +19,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2 import id_token
-from google.oauth2.credentials import Credentials
-from googleapiclient.discovery import build
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -24,16 +26,13 @@ DATABASE_URL = os.getenv("DATABASE_URL", "")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "")
-APP_ENCRYPTION_KEY = os.getenv("APP_ENCRYPTION_KEY", "")
+APP_ENCRYPTION_KEY = os.getenv("APPS_SCRIPT_ENCRYPTION_KEY") or os.getenv("APP_ENCRYPTION_KEY", "")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://inboxmind-aaravpachouri.vercel.app").rstrip("/")
 ALLOWED_ORIGINS = [x.strip() for x in os.getenv("ALLOWED_ORIGINS", FRONTEND_URL).split(",") if x.strip()]
 SESSION_COOKIE = "__Host-inboxmind_session"
 SESSION_TTL = timedelta(days=7)
 SCOPES = [
     "openid", "email", "profile",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/gmail.send",
 ]
 app = FastAPI(title="InboxMind Secure API", version="1.0.0")
 app.add_middleware(
@@ -54,11 +53,11 @@ def _pool_or_503() -> ConnectionPool:
 
 def _fernet() -> Fernet:
     if not APP_ENCRYPTION_KEY:
-        raise HTTPException(503, "APP_ENCRYPTION_KEY is not configured; Gmail credentials are not available.")
+        raise HTTPException(503, "APP_ENCRYPTION_KEY is not configured; Apps Script bridge secrets cannot be stored safely.")
     try:
         return Fernet(APP_ENCRYPTION_KEY.encode())
     except (ValueError, TypeError):
-        raise HTTPException(503, "APP_ENCRYPTION_KEY must be a valid Fernet key.") from None
+        raise HTTPException(503, "APP_ENCRYPTION_KEY must be a valid Fernet key to encrypt Apps Script bridge secrets.") from None
 
 
 def _hash(value: str) -> bytes:
@@ -104,6 +103,59 @@ def health() -> dict[str, str]:
     with pool.connection() as conn:
         conn.execute("SELECT 1")
     return {"status": "ok", "service": "inboxmind-secure-api"}
+
+
+
+@app.post("/api/v1/apps-script/login")
+async def apps_script_login(
+    body: BridgeConnectRequest,
+    request: Request,
+    response: Response,
+) -> dict[str, Any]:
+    """Authenticate by possession of the user's own secret-protected Apps Script bridge.
+
+    Gmail authorization remains inside that user's Apps Script deployment; this route
+    does not request Gmail OAuth scopes or accept a shared global bridge.
+    """
+    bridge_url = _validate_bridge_url(body.bridge_url.strip())
+    profile = await _bridge_request(bridge_url, body.bridge_secret, "profile")
+    email = str(profile.get("email", "")).strip().lower() if isinstance(profile, dict) else ""
+    if not email or "@" not in email:
+        raise HTTPException(502, "Apps Script did not return a valid mailbox identity.")
+    _fernet()
+    pool = _pool_or_503()
+    account_key = "apps-script:" + email
+    csrf = secrets.token_urlsafe(32)
+    session_token = secrets.token_urlsafe(48)
+    expires = datetime.now(timezone.utc) + SESSION_TTL
+    encrypted_secret = _fernet().encrypt(body.bridge_secret.encode())
+    with pool.connection() as conn, conn.transaction():
+        user = conn.execute(
+            """INSERT INTO app_users(google_sub,email,email_verified,display_name,picture_url)
+               VALUES (%s,%s,true,%s,'')
+               ON CONFLICT(google_sub) DO UPDATE SET email=EXCLUDED.email,email_verified=true,updated_at=now()
+               RETURNING id,email,display_name,picture_url""",
+            (account_key, email, email.split("@")[0]),
+        ).fetchone()
+        _set_user_context(conn, str(user["id"]))
+        conn.execute(
+            """INSERT INTO user_apps_script_bridges
+                 (user_id,google_account_email,bridge_url,bridge_secret_ciphertext,updated_at,revoked_at)
+               VALUES (%s,%s,%s,%s,now(),NULL)
+               ON CONFLICT(user_id,google_account_email) DO UPDATE SET
+                 bridge_url=EXCLUDED.bridge_url,bridge_secret_ciphertext=EXCLUDED.bridge_secret_ciphertext,
+                 updated_at=now(),revoked_at=NULL""",
+            (user["id"], email, bridge_url, encrypted_secret),
+        )
+        conn.execute(
+            "INSERT INTO user_sessions(user_id,session_token_hash,csrf_token_hash,expires_at) VALUES (%s,%s,%s,%s)",
+            (user["id"], _hash(session_token), _hash(csrf), expires),
+        )
+    response.set_cookie(SESSION_COOKIE, session_token, httponly=True, secure=True, samesite="lax",
+                        max_age=int(SESSION_TTL.total_seconds()), path="/")
+    response.set_cookie("inboxmind_csrf", csrf, httponly=False, secure=True, samesite="lax",
+                        max_age=int(SESSION_TTL.total_seconds()), path="/")
+    return {"connected": True, "email": email, "message": "Signed in using your personal Apps Script bridge."}
 
 
 @app.get("/api/v1/auth/google/login")
@@ -157,11 +209,6 @@ async def google_callback(code: str = "", state: str = "", error: str = "") -> R
         raise HTTPException(401, "Google identity token could not be verified.") from None
     if not claims.get("email") or claims.get("email_verified") is not True or not claims.get("sub"):
         raise HTTPException(403, "A verified Google email is required.")
-    if not tokens.get("refresh_token"):
-        raise HTTPException(502, "Google did not return a refresh token. Revoke InboxMind access in Google Account settings and sign in again.")
-    cipher = _fernet()
-    refresh_ciphertext = cipher.encrypt(tokens["refresh_token"].encode())
-    access_ciphertext = cipher.encrypt(tokens["access_token"].encode()) if tokens.get("access_token") else None
     csrf = secrets.token_urlsafe(32)
     session_token = secrets.token_urlsafe(48)
     expires = datetime.now(timezone.utc) + SESSION_TTL
@@ -178,20 +225,6 @@ async def google_callback(code: str = "", state: str = "", error: str = "") -> R
             """INSERT INTO user_sessions(user_id,session_token_hash,csrf_token_hash,expires_at)
                VALUES (%s,%s,%s,%s)""", (user["id"], _hash(session_token), _hash(csrf), expires),
         )
-        _set_user_context(conn, str(user["id"]))
-        conn.execute(
-            """INSERT INTO gmail_accounts(user_id,google_account_sub,email,granted_scopes,
-                      refresh_token_ciphertext,access_token_ciphertext,access_token_expires_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT(user_id,google_account_sub) DO UPDATE SET
-                 email=EXCLUDED.email,granted_scopes=EXCLUDED.granted_scopes,
-                 refresh_token_ciphertext=EXCLUDED.refresh_token_ciphertext,
-                 access_token_ciphertext=EXCLUDED.access_token_ciphertext,
-                 access_token_expires_at=EXCLUDED.access_token_expires_at,revoked_at=NULL""",
-            (user["id"], claims["sub"], claims["email"], tokens.get("scope", "").split(),
-             refresh_ciphertext, access_ciphertext,
-             datetime.now(timezone.utc) + timedelta(seconds=int(tokens.get("expires_in", 3600)))),
-        )
     response = RedirectResponse(FRONTEND_URL + "/?signed_in=1", status_code=302)
     response.set_cookie(SESSION_COOKIE, session_token, httponly=True, secure=True, samesite="lax",
                         max_age=int(SESSION_TTL.total_seconds()), path="/")
@@ -201,16 +234,26 @@ async def google_callback(code: str = "", state: str = "", error: str = "") -> R
 
 
 @app.get("/api/v1/auth/status")
-def auth_status(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+async def auth_status(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     if not session:
-        return {"connected": False, "email": None, "message": "Sign in with Google to connect your Gmail account."}
+        return {"connected": False, "email": None, "message": "Sign in to connect your personal Apps Script bridge."}
     try:
         user = _current_user(session)
     except HTTPException as exc:
         if exc.status_code == 401:
             return {"connected": False, "email": None, "message": "Session expired. Sign in again."}
         raise
-    return {"connected": True, "email": user["email"], "message": "Gmail connected through Google OAuth."}
+    try:
+        bridge = _get_user_bridge(user)
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            return {"connected": False, "email": None, "message": "Signed in. Connect your personal Apps Script bridge to access Gmail."}
+        raise
+    profile = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "profile")
+    email = str(profile.get("email", "")).strip().lower() if isinstance(profile, dict) else ""
+    if email != str(bridge["google_account_email"]).lower():
+        raise HTTPException(502, "Apps Script mailbox identity changed. Reconnect the bridge.")
+    return {"connected": True, "email": email, "message": "Gmail connected through your personal Apps Script deployment."}
 
 
 @app.get("/api/v1/auth/me")
@@ -233,56 +276,925 @@ def logout(request: Request, response: Response,
     return {"ok": True}
 
 
-@app.get("/api/v1/emails")
-@app.get("/api/v1/gmail/emails")
-def list_emails(limit: int = Query(default=25, ge=1, le=100),
-                session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
-    user = _current_user(session)
+class BridgeConnectRequest(BaseModel):
+    bridge_url: str = Field(min_length=1, max_length=500)
+    bridge_secret: str = Field(min_length=32, max_length=500)
+
+
+def _validate_bridge_url(value: str) -> str:
+    parsed = urlparse(value)
+    if (parsed.scheme != "https" or parsed.hostname != "script.google.com"
+            or not parsed.path.startswith("/macros/s/") or not parsed.path.endswith("/exec")
+            or parsed.query or parsed.fragment or parsed.username or parsed.password):
+        raise HTTPException(422, "Use the HTTPS Apps Script web-app /exec URL from your own deployment.")
+    return value
+
+
+async def _bridge_request(url: str, secret: str, action: str, params: dict[str, Any] | None = None) -> Any:
+    try:
+        async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
+            response = await client.post(url, json={"secret": secret, "action": action, "params": params or {}})
+        response.raise_for_status()
+        payload = response.json()
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(502, "Apps Script bridge could not be reached. Check the deployment URL and access settings.") from None
+    if not isinstance(payload, dict) or payload.get("ok") is not True:
+        error = payload.get("error", "Bridge returned an invalid response.") if isinstance(payload, dict) else "Bridge returned an invalid response."
+        raise HTTPException(502, str(error)[:250])
+    return payload.get("result")
+
+
+def _get_user_bridge(user: dict[str, Any]) -> dict[str, Any]:
     pool = _pool_or_503()
-    with pool.connection() as conn:
+    # RLS context is transaction-local (set_config(..., true)); keep it and
+    # the protected query inside the same transaction.
+    with pool.connection() as conn, conn.transaction():
         _set_user_context(conn, str(user["id"]))
-        account = conn.execute(
-            """SELECT id,email,refresh_token_ciphertext,access_token_ciphertext,access_token_expires_at
-               FROM gmail_accounts WHERE user_id=%s AND revoked_at IS NULL ORDER BY connected_at DESC LIMIT 1""",
+        row = conn.execute(
+            """SELECT id, google_account_email, bridge_url, bridge_secret_ciphertext
+               FROM user_apps_script_bridges
+               WHERE user_id=%s AND revoked_at IS NULL
+               ORDER BY updated_at DESC LIMIT 1""",
             (user["id"],),
         ).fetchone()
-    if not account:
-        raise HTTPException(409, "Connect your Gmail account first.")
-    cipher = _fernet()
+    if not row:
+        raise HTTPException(409, "Connect your personal Apps Script bridge first.")
     try:
-        refresh = cipher.decrypt(bytes(account["refresh_token_ciphertext"])).decode()
-        access = cipher.decrypt(bytes(account["access_token_ciphertext"])).decode() if account["access_token_ciphertext"] else None
+        secret = _fernet().decrypt(bytes(row["bridge_secret_ciphertext"])).decode()
     except (InvalidToken, ValueError):
-        raise HTTPException(503, "Stored Gmail credentials could not be decrypted; contact support.") from None
-    creds = Credentials(token=access, refresh_token=refresh, token_uri="https://oauth2.googleapis.com/token",
-                        client_id=GOOGLE_CLIENT_ID, client_secret=GOOGLE_CLIENT_SECRET, scopes=SCOPES)
+        raise HTTPException(503, "Saved Apps Script bridge credentials could not be decrypted.") from None
+    return {**row, "bridge_secret": secret}
+
+
+@app.post("/api/v1/apps-script/connect")
+async def connect_apps_script_bridge(
+    body: BridgeConnectRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge_url = _validate_bridge_url(body.bridge_url.strip())
+    profile = await _bridge_request(bridge_url, body.bridge_secret, "profile")
+    email = str(profile.get("email", "")).strip().lower() if isinstance(profile, dict) else ""
+    if not email:
+        raise HTTPException(502, "Bridge did not return a verified Gmail profile.")
+    pool = _pool_or_503()
+    encrypted_secret = _fernet().encrypt(body.bridge_secret.encode())
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        conn.execute(
+            """INSERT INTO user_apps_script_bridges
+                 (user_id, google_account_email, bridge_url, bridge_secret_ciphertext, updated_at, revoked_at)
+               VALUES (%s,%s,%s,%s,now(),NULL)
+               ON CONFLICT(user_id, google_account_email) DO UPDATE SET
+                 bridge_url=EXCLUDED.bridge_url,
+                 bridge_secret_ciphertext=EXCLUDED.bridge_secret_ciphertext,
+                 updated_at=now(), revoked_at=NULL""",
+            (user["id"], email, bridge_url, encrypted_secret),
+        )
+    return {"connected": True, "email": email, "message": "Personal Apps Script bridge connected."}
+
+
+@app.get("/api/v1/apps-script/status")
+async def apps_script_status(
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
     try:
-        if not creds.valid:
-            creds.refresh(GoogleRequest())
-            with pool.connection() as conn, conn.transaction():
-                _set_user_context(conn, str(user["id"]))
-                conn.execute("""UPDATE gmail_accounts SET access_token_ciphertext=%s,
-                              access_token_expires_at=%s WHERE user_id=%s AND id=%s""",
-                             (cipher.encrypt(creds.token.encode()), creds.expiry, user["id"], account["id"]))
-        gmail = build("gmail", "v1", credentials=creds, cache_discovery=False)
-        result = gmail.users().messages().list(userId="me", maxResults=limit, labelIds=["INBOX"]).execute()
-        messages = []
-        for item in result.get("messages", []):
-            msg = gmail.users().messages().get(userId="me", id=item["id"], format="metadata",
-                    metadataHeaders=["From", "To", "Subject", "Date"]).execute()
-            headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", [])}
-            messages.append({"id": msg["id"], "thread_id": msg.get("threadId", ""),
-                             "from_address": headers.get("from", ""), "to_addresses": headers.get("to", ""),
-                             "subject": headers.get("subject", "(no subject)"), "snippet": msg.get("snippet", ""),
-                             "internal_date": msg.get("internalDate", ""),
-                             "labels": msg.get("labelIds", []), "is_unread": "UNREAD" in msg.get("labelIds", []),
-                             "is_sent": "SENT" in msg.get("labelIds", []),
-                             "has_attachments": any(p.get("filename") for p in msg.get("payload", {}).get("parts", []))})
-        return {"items": messages, "total": len(messages), "total_estimate": len(messages), "next_page_token": None, "source": "gmail", "account_email": account["email"]}
-    except HTTPException:
+        bridge = _get_user_bridge(user)
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            return {"connected": False, "email": None, "message": str(exc.detail)}
         raise
-    except Exception as exc:
-        raise HTTPException(502, f"Gmail request failed ({type(exc).__name__}).") from None
+    profile = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "profile")
+    email = str(profile.get("email", "")).strip().lower() if isinstance(profile, dict) else ""
+    if email != str(bridge["google_account_email"]).lower():
+        raise HTTPException(502, "Apps Script mailbox identity changed. Reconnect the bridge.")
+    return {"connected": True, "email": email, "message": "Gmail connected through your Apps Script deployment."}
+
+
+@app.post("/api/v1/apps-script/revoke")
+def revoke_apps_script_bridge(
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, bool]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        conn.execute(
+            "UPDATE user_apps_script_bridges SET revoked_at=now(), updated_at=now() WHERE user_id=%s AND revoked_at IS NULL",
+            (user["id"],),
+        )
+    return {"ok": True}
+
+
+@app.get("/api/v1/emails")
+@app.get("/api/v1/gmail/emails")
+async def list_emails(
+    limit: int = Query(default=25, ge=1, le=100),
+    query: str = Query(default="in:inbox", max_length=500),
+    page_token: str | None = Query(default=None, max_length=500),
+    offset: int = Query(default=0, ge=0),
+    live: bool = Query(default=True),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = _get_user_bridge(user)
+    # Apps Script currently caps each page at 10 messages; pass through the user's
+    # search and page token instead of silently forcing every request to the inbox.
+    result = await _bridge_request(
+        bridge["bridge_url"], bridge["bridge_secret"], "list_emails",
+        {"max_results": min(limit, 10), "query": query or "in:inbox",
+         "page_token": page_token or str(offset // min(limit, 10)) if offset else (page_token or "0")},
+    )
+    if not isinstance(result, dict) or not isinstance(result.get("items", []), list):
+        raise HTTPException(502, "Apps Script bridge returned an invalid email page.")
+    return {
+        "items": result.get("items", []),
+        "total": result.get("total_estimate", len(result.get("items", []))),
+        "total_estimate": result.get("total_estimate", len(result.get("items", []))),
+        "next_page_token": result.get("next_page_token"),
+        "source": "apps_script",
+        "account_email": bridge["google_account_email"],
+    }
+
+
+class EmailActionRequest(BaseModel):
+    confirm: bool = False
+
+
+class LabelModifyRequest(BaseModel):
+    add_labels: list[str] = Field(default_factory=list)
+    remove_labels: list[str] = Field(default_factory=list)
+
+
+class CreateLabelRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=225)
+
+
+@app.get("/api/v1/emails/{message_id}")
+async def get_email(
+    message_id: str,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "get_email", {"message_id": message_id})
+    if not isinstance(result, dict):
+        raise HTTPException(502, "Apps Script bridge returned an invalid email.")
+    return result
+
+
+@app.get("/api/v1/emails/{message_id}/thread")
+async def get_email_thread(
+    message_id: str,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = _get_user_bridge(user)
+    email = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "get_email", {"message_id": message_id})
+    thread_id = email.get("thread_id") or email.get("threadId") if isinstance(email, dict) else None
+    if not thread_id:
+        raise HTTPException(502, "Email did not contain a thread identifier.")
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "get_thread", {"thread_id": thread_id})
+    return {"items": result if isinstance(result, list) else []}
+
+
+@app.get("/api/v1/labels")
+async def list_labels(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "list_labels")
+    return {"items": result if isinstance(result, list) else []}
+
+
+@app.post("/api/v1/labels")
+async def create_label(
+    body: CreateLabelRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge = _get_user_bridge(user)
+    return await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "create_label", {"name": body.name.strip()})
+
+
+@app.post("/api/v1/emails/{message_id}/labels")
+async def modify_email_labels(
+    message_id: str,
+    body: LabelModifyRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge = _get_user_bridge(user)
+    return await _bridge_request(
+        bridge["bridge_url"], bridge["bridge_secret"], "modify_labels",
+        {"message_id": message_id, "add_labels": body.add_labels, "remove_labels": body.remove_labels},
+    )
+
+
+async def _email_action(
+    message_id: str, action: str, confirmed: bool = False,
+    session: str | None = None,
+) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = _get_user_bridge(user)
+    params: dict[str, Any] = {"message_id": message_id}
+    if action == "trash":
+        if not confirmed:
+            raise HTTPException(400, "Confirm moving this email to Trash before continuing.")
+        params["confirmed"] = True
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], action, params)
+    return result if isinstance(result, dict) else {"ok": True, "result": result}
+
+
+@app.post("/api/v1/emails/{message_id}/archive")
+async def archive_email(
+    message_id: str, request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "archive", {"message_id": message_id})
+    return result if isinstance(result, dict) else {"ok": True}
+
+
+@app.post("/api/v1/emails/{message_id}/trash")
+async def trash_email(
+    message_id: str, body: EmailActionRequest, request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    if not body.confirm:
+        raise HTTPException(400, "Confirm moving this email to Trash before continuing.")
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "trash", {"message_id": message_id, "confirmed": True})
+    return result if isinstance(result, dict) else {"ok": True}
+
+
+@app.post("/api/v1/emails/{message_id}/mark-read")
+async def mark_email_read(
+    message_id: str, request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "mark_read", {"message_id": message_id})
+    return result if isinstance(result, dict) else {"ok": True}
+
+
+@app.post("/api/v1/emails/{message_id}/mark-unread")
+async def mark_email_unread(
+    message_id: str, request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "mark_unread", {"message_id": message_id})
+    return result if isinstance(result, dict) else {"ok": True}
+
+
+@app.get("/api/v1/calendar/events")
+async def list_calendar_events(
+    days: int = Query(default=14, ge=1, le=90),
+    limit: int = Query(default=30, ge=1, le=50),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = _get_user_bridge(user)
+    now = datetime.now(timezone.utc)
+    result = await _bridge_request(
+        bridge["bridge_url"], bridge["bridge_secret"], "list_calendar_events",
+        {"time_min": now.isoformat(), "time_max": (now + timedelta(days=days)).isoformat(), "max_results": limit},
+    )
+    return {"items": result if isinstance(result, list) else []}
+
+
+@app.post("/api/v1/calendar/events")
+async def create_calendar_event(
+    body: dict[str, Any], request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    if not body.get("summary") or not body.get("start") or not body.get("end"):
+        raise HTTPException(422, "Event summary, start and end are required.")
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(
+        bridge["bridge_url"], bridge["bridge_secret"], "create_calendar_event",
+        {"summary": str(body["summary"])[:250], "description": str(body.get("description", ""))[:5000],
+         "start": body["start"], "end": body["end"], "attendees": body.get("attendees", []), "confirmed": True},
+    )
+    return result if isinstance(result, dict) else {"ok": True, "result": result}
+
+
+
+class DraftPayload(BaseModel):
+    to_addresses: list[str] = Field(default_factory=list, max_length=50)
+    cc_addresses: list[str] = Field(default_factory=list, max_length=50)
+    bcc_addresses: list[str] = Field(default_factory=list, max_length=50)
+    subject: str = Field(default="", max_length=998)
+    body_text: str = Field(default="", max_length=100000)
+    source_email_id: str | None = None
+    create_in_gmail: bool = True
+
+
+def _draft_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    payload = row.get("payload") or {}
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            payload = {}
+    return {
+        "id": str(row["id"]), "to_addresses": payload.get("to_addresses", []),
+        "cc_addresses": payload.get("cc_addresses", []), "bcc_addresses": payload.get("bcc_addresses", []),
+        "subject": payload.get("subject", ""), "body_text": payload.get("body_text", ""),
+        "status": row.get("status", "draft"), "source_email_id": payload.get("source_email_id"),
+        "gmail_draft_id": row.get("gmail_draft_id"), "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"), "sent_at": payload.get("sent_at"),
+        "ai_provider": payload.get("ai_provider"), "warning": payload.get("warning"),
+    }
+
+
+@app.get("/api/v1/drafts")
+def list_drafts(
+    status: str = Query(default="draft", max_length=30),
+    limit: int = Query(default=100, ge=1, le=500),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        if status == "all":
+            rows = conn.execute(
+                "SELECT id,payload,status,gmail_draft_id,created_at,updated_at FROM user_drafts WHERE user_id=%s ORDER BY updated_at DESC LIMIT %s",
+                (user["id"], limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id,payload,status,gmail_draft_id,created_at,updated_at FROM user_drafts WHERE user_id=%s AND status=%s ORDER BY updated_at DESC LIMIT %s",
+                (user["id"], status, limit),
+            ).fetchall()
+    return {"items": [_draft_from_row(row) for row in rows]}
+
+
+@app.post("/api/v1/drafts")
+async def create_draft(
+    body: DraftPayload,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    if not body.to_addresses or any("@" not in address or len(address) > 320 for address in body.to_addresses):
+        raise HTTPException(422, "At least one valid recipient address is required.")
+    bridge = _get_user_bridge(user)
+    gmail_draft_id = None
+    if body.create_in_gmail:
+        created = await _bridge_request(
+            bridge["bridge_url"], bridge["bridge_secret"], "create_draft",
+            {"to_addresses": body.to_addresses, "cc_addresses": body.cc_addresses,
+             "bcc_addresses": body.bcc_addresses, "subject": body.subject, "body_text": body.body_text},
+        )
+        gmail_draft_id = str(created.get("id") or created.get("draft_id") or "") if isinstance(created, dict) else ""
+        if not gmail_draft_id:
+            raise HTTPException(502, "Gmail did not return a draft ID; the draft was not saved locally.")
+    payload = {"to_addresses": body.to_addresses, "cc_addresses": body.cc_addresses,
+               "bcc_addresses": body.bcc_addresses, "subject": body.subject, "body_text": body.body_text,
+               "source_email_id": body.source_email_id}
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            """INSERT INTO user_drafts(user_id,gmail_draft_id,payload,status)
+               VALUES (%s,%s,%s::jsonb,'draft')
+               RETURNING id,payload,status,gmail_draft_id,created_at,updated_at""",
+            (user["id"], gmail_draft_id, json.dumps(payload)),
+        ).fetchone()
+    return _draft_from_row(row)
+
+
+
+@app.patch("/api/v1/drafts/{draft_id}")
+async def update_draft(
+    draft_id: str,
+    body: DraftPayload,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        existing = conn.execute(
+            "SELECT id,payload,status,gmail_draft_id,created_at,updated_at FROM user_drafts WHERE user_id=%s AND id=%s",
+            (user["id"], draft_id),
+        ).fetchone()
+    if not existing:
+        raise HTTPException(404, "Draft not found.")
+    old_gmail_id = existing.get("gmail_draft_id")
+    new_gmail_id = old_gmail_id
+    bridge = _get_user_bridge(user)
+    if old_gmail_id:
+        created = await _bridge_request(
+            bridge["bridge_url"], bridge["bridge_secret"], "create_draft",
+            {"to_addresses": body.to_addresses, "cc_addresses": body.cc_addresses,
+             "bcc_addresses": body.bcc_addresses, "subject": body.subject, "body_text": body.body_text},
+        )
+        new_gmail_id = str(created.get("id") or created.get("draft_id") or "") if isinstance(created, dict) else ""
+        if not new_gmail_id:
+            raise HTTPException(502, "Gmail did not return the updated draft ID; the original draft remains unchanged.")
+    payload = {"to_addresses": body.to_addresses, "cc_addresses": body.cc_addresses,
+               "bcc_addresses": body.bcc_addresses, "subject": body.subject, "body_text": body.body_text,
+               "source_email_id": body.source_email_id}
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            """UPDATE user_drafts SET payload=%s::jsonb,gmail_draft_id=%s,updated_at=now()
+               WHERE user_id=%s AND id=%s
+               RETURNING id,payload,status,gmail_draft_id,created_at,updated_at""",
+            (json.dumps(payload), new_gmail_id, user["id"], draft_id),
+        ).fetchone()
+    if old_gmail_id and new_gmail_id and old_gmail_id != new_gmail_id:
+        try:
+            await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "delete_draft",
+                                  {"draft_id": old_gmail_id, "confirmed": True})
+        except HTTPException:
+            row["payload"]["warning"] = "Updated Gmail draft saved, but the previous Gmail draft could not be removed. Check Gmail before sending."
+    return _draft_from_row(row)
+
+
+
+class TaskCreateRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=500)
+    description: str = Field(default="", max_length=5000)
+    priority: str = Field(default="medium", pattern="^(low|medium|high|urgent)$")
+    due_date: str | None = None
+    source_email_id: str | None = None
+
+
+class TaskUpdateRequest(BaseModel):
+    status: str | None = Field(default=None, pattern="^(open|in_progress|done|dismissed)$")
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    description: str | None = Field(default=None, max_length=5000)
+    priority: str | None = Field(default=None, pattern="^(low|medium|high|urgent)$")
+    due_date: str | None = None
+
+
+def _task_from_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row["id"]), "title": row["title"], "description": row.get("description", ""),
+        "due_date": row.get("due_at"), "priority": row.get("priority", "medium"),
+        "status": row.get("status", "open"), "source_email_id": row.get("source_message_id"),
+        "created_at": row.get("created_at"),
+    }
+
+
+@app.get("/api/v1/tasks")
+def list_tasks(
+    status: str = Query(default="open", max_length=30),
+    limit: int = Query(default=200, ge=1, le=500),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        if status == "all":
+            rows = conn.execute(
+                "SELECT id,title,description,due_at,priority,status,source_message_id,created_at FROM user_tasks WHERE user_id=%s ORDER BY created_at DESC LIMIT %s",
+                (user["id"], limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id,title,description,due_at,priority,status,source_message_id,created_at FROM user_tasks WHERE user_id=%s AND status=%s ORDER BY created_at DESC LIMIT %s",
+                (user["id"], status, limit),
+            ).fetchall()
+    return {"items": [_task_from_row(row) for row in rows]}
+
+
+@app.post("/api/v1/tasks")
+def create_task(
+    body: TaskCreateRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    due_at = body.due_date
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            """INSERT INTO user_tasks(user_id,source_message_id,title,description,due_at,priority,status)
+               VALUES (%s,%s,%s,%s,%s,%s,'open')
+               RETURNING id,title,description,due_at,priority,status,source_message_id,created_at""",
+            (user["id"], body.source_email_id, body.title.strip(), body.description, due_at, body.priority),
+        ).fetchone()
+    return _task_from_row(row)
+
+
+@app.patch("/api/v1/tasks/{task_id}")
+def update_task(
+    task_id: str,
+    body: TaskUpdateRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    changes = body.model_dump(exclude_unset=True)
+    if not changes:
+        raise HTTPException(422, "Provide at least one task field to update.")
+    allowed = {"status": "status", "title": "title", "description": "description", "priority": "priority", "due_date": "due_at"}
+    sets = []
+    values: list[Any] = []
+    for key, value in changes.items():
+        column = allowed[key]
+        sets.append(f"{column}=%s")
+        values.append(value)
+    sets.append("updated_at=now()")
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            f"UPDATE user_tasks SET {', '.join(sets)} WHERE user_id=%s AND id=%s "
+            "RETURNING id,title,description,due_at,priority,status,source_message_id,created_at",
+            (*values, user["id"], task_id),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Task not found.")
+    return _task_from_row(row)
+
+
+@app.get("/api/v1/settings")
+def get_user_settings(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+    user = _current_user(session)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute("SELECT settings FROM user_settings WHERE user_id=%s", (user["id"],)).fetchone()
+    return row["settings"] if row and isinstance(row.get("settings"), dict) else {
+        "ai_enabled": False, "auto_sync_enabled": False, "ai_provider": "unavailable",
+        "note": "Hosted AI and automatic sync are disabled until explicitly configured.",
+    }
+
+
+@app.patch("/api/v1/settings")
+def update_user_settings(
+    body: dict[str, Any],
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    allowed = {"ai_enabled", "auto_sync_enabled", "sync_interval_seconds", "sync_window_days", "ollama_model"}
+    if not body or set(body) - allowed:
+        raise HTTPException(422, "Unsupported or empty settings update.")
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            """INSERT INTO user_settings(user_id,settings,updated_at) VALUES (%s,%s::jsonb,now())
+               ON CONFLICT(user_id) DO UPDATE SET settings=user_settings.settings || EXCLUDED.settings,updated_at=now()
+               RETURNING settings""",
+            (user["id"], json.dumps(body)),
+        ).fetchone()
+    return {"saved": True, "settings": row["settings"]}
+
+
+@app.get("/api/v1/system/model")
+def hosted_model_status(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+    _current_user(session)
+    return {"available": False, "provider": "unavailable", "model": None,
+            "detail": "The hosted API has no local Ollama process. AI drafting and chat need a configured provider."}
+
+
+@app.get("/api/v1/insights")
+async def user_insights(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+    user = _current_user(session)
+    bridge = None
+    try:
+        bridge = _get_user_bridge(user)
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+    task_pool = _pool_or_503()
+    with task_pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        counts = conn.execute(
+            "SELECT COUNT(*) FILTER (WHERE status IN ('open','in_progress')) AS open_count, "
+            "COUNT(*) FILTER (WHERE status='open' AND due_at < now()) AS overdue_count FROM user_tasks WHERE user_id=%s",
+            (user["id"],),
+        ).fetchone()
+    profile = {}
+    if bridge:
+        profile = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "profile")
+    return {
+        "connected": bool(bridge), "email_count": int(profile.get("messages_total", 0)) if isinstance(profile, dict) else 0,
+        "unread_count": 0, "high_priority_count": 0, "open_tasks_count": int(counts["open_count"] or 0),
+        "overdue_tasks_count": int(counts["overdue_count"] or 0), "category_counts": {},
+        "recent_activity": [], "model_available": False,
+    }
+
+
+
+class DraftSendRequest(BaseModel):
+    confirm_send: bool = False
+
+
+@app.post("/api/v1/drafts/{draft_id}/send")
+async def send_draft(
+    draft_id: str,
+    body: DraftSendRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    if not body.confirm_send:
+        raise HTTPException(400, "Explicitly confirm sending this email.")
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            "SELECT id,payload,status,gmail_draft_id FROM user_drafts WHERE user_id=%s AND id=%s",
+            (user["id"], draft_id),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Draft not found.")
+    if row["status"] != "draft":
+        raise HTTPException(409, "Only a draft can be sent.")
+    if not row.get("gmail_draft_id"):
+        raise HTTPException(409, "This item has no verified Gmail draft ID and cannot be sent.")
+    bridge = _get_user_bridge(user)
+    result = await _bridge_request(
+        bridge["bridge_url"], bridge["bridge_secret"], "send_draft",
+        {"draft_id": row["gmail_draft_id"], "confirmed": True},
+    )
+    payload = row.get("payload") or {}
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    payload["sent_at"] = datetime.now(timezone.utc).isoformat()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        updated = conn.execute(
+            """UPDATE user_drafts SET status='sent',payload=%s::jsonb,updated_at=now()
+               WHERE user_id=%s AND id=%s
+               RETURNING id,payload,status,gmail_draft_id,created_at,updated_at""",
+            (json.dumps(payload), user["id"], draft_id),
+        ).fetchone()
+    return {"ok": True, "draft": _draft_from_row(updated), "gmail_result": result}
+
+
+@app.delete("/api/v1/drafts/{draft_id}")
+async def delete_draft(
+    draft_id: str,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, bool]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            "SELECT gmail_draft_id,status FROM user_drafts WHERE user_id=%s AND id=%s",
+            (user["id"], draft_id),
+        ).fetchone()
+    if not row:
+        raise HTTPException(404, "Draft not found.")
+    if row.get("gmail_draft_id") and row.get("status") == "draft":
+        bridge = _get_user_bridge(user)
+        await _bridge_request(
+            bridge["bridge_url"], bridge["bridge_secret"], "delete_draft",
+            {"draft_id": row["gmail_draft_id"], "confirmed": True},
+        )
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        conn.execute("DELETE FROM user_drafts WHERE user_id=%s AND id=%s", (user["id"], draft_id))
+    return {"ok": True}
+
+
+class MemoryPayload(BaseModel):
+    category: str = Field(default="general", min_length=1, max_length=80)
+    key: str = Field(min_length=1, max_length=200)
+    value: str = Field(default="", max_length=10000)
+
+
+@app.get("/api/v1/memory")
+def list_memory(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+    user = _current_user(session)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        rows = conn.execute(
+            "SELECT id,category,key,value,created_at,updated_at FROM user_memories WHERE user_id=%s ORDER BY updated_at DESC LIMIT 500",
+            (user["id"],),
+        ).fetchall()
+    return {"items": [{**row, "id": str(row["id"])} for row in rows]}
+
+
+@app.post("/api/v1/memory")
+def create_memory(
+    body: MemoryPayload,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            """INSERT INTO user_memories(user_id,category,key,value)
+               VALUES (%s,%s,%s,%s)
+               ON CONFLICT(user_id,category,key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()
+               RETURNING id,category,key,value,created_at,updated_at""",
+            (user["id"], body.category.strip(), body.key.strip(), body.value),
+        ).fetchone()
+    return {**row, "id": str(row["id"])}
+
+
+class ConfirmRequest(BaseModel):
+    confirm: bool = False
+
+
+@app.delete("/api/v1/memory/{memory_id}")
+def delete_memory(
+    memory_id: str,
+    body: ConfirmRequest,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, bool]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    if not body.confirm:
+        raise HTTPException(400, "Confirm deleting this memory.")
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        cur = conn.execute("DELETE FROM user_memories WHERE user_id=%s AND id=%s", (user["id"], memory_id))
+    if cur.rowcount == 0:
+        raise HTTPException(404, "Memory not found.")
+    return {"ok": True}
+
+
+class FeedbackPayload(BaseModel):
+    kind: str = Field(default="general", pattern="^(summary|priority|draft|classification|general)$")
+    feedback_text: str = Field(min_length=1, max_length=5000)
+    input_summary: str = Field(default="", max_length=5000)
+
+
+@app.get("/api/v1/feedback")
+def list_feedback(
+    limit: int = Query(default=20, ge=1, le=100),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        rows = conn.execute(
+            "SELECT id,kind,feedback_text,input_summary,created_at FROM user_feedback WHERE user_id=%s ORDER BY created_at DESC LIMIT %s",
+            (user["id"], limit),
+        ).fetchall()
+    return {"items": [{**row, "id": str(row["id"])} for row in rows]}
+
+
+@app.post("/api/v1/feedback")
+def create_feedback(
+    body: FeedbackPayload,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        row = conn.execute(
+            """INSERT INTO user_feedback(user_id,kind,feedback_text,input_summary)
+               VALUES (%s,%s,%s,%s) RETURNING id,kind,feedback_text,input_summary,created_at""",
+            (user["id"], body.kind, body.feedback_text, body.input_summary),
+        ).fetchone()
+    return {**row, "id": str(row["id"])}
+
+
+@app.get("/api/v1/notifications")
+def list_notifications(
+    unread_only: bool = False,
+    limit: int = Query(default=50, ge=1, le=100),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    _current_user(session)
+    # Notifications are not generated by the hosted bridge yet. Return an explicit empty
+    # collection rather than inventing notifications or implying a background worker ran.
+    return {"items": [], "unread_count": 0}
+
+
+@app.post("/api/v1/sync")
+async def sync_mailbox(
+    body: dict[str, Any],
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    bridge = _get_user_bridge(user)
+    max_results = min(max(int(body.get("max_results", 10)), 1), 10)
+    query = str(body.get("query") or "in:inbox newer_than:30d")[:500]
+    page_token = str(body.get("page_token") or "0")[:500]
+    result = await _bridge_request(
+        bridge["bridge_url"], bridge["bridge_secret"], "list_emails",
+        {"max_results": max_results, "query": query, "page_token": page_token},
+    )
+    if not isinstance(result, dict):
+        raise HTTPException(502, "Apps Script returned an invalid sync page.")
+    items = result.get("items") if isinstance(result.get("items"), list) else []
+    # This route currently fetches a bounded live page; no persistent message index or AI
+    # analysis is claimed. The response reports stored=0 until that index is implemented.
+    return {"fetched": len(items), "stored": 0, "analyzed": 0, "tasks_created": 0,
+            "errors": [], "next_page_token": result.get("next_page_token")}
+
+
+@app.get("/api/v1/briefing/daily")
+async def daily_briefing(
+    hours: int = Query(default=24, ge=1, le=168),
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        tasks = conn.execute(
+            """SELECT id,title,description,due_at,priority,status,source_message_id,created_at
+               FROM user_tasks WHERE user_id=%s AND status IN ('open','in_progress')
+               AND (due_at IS NULL OR due_at <= now() + (%s * interval '1 hour'))
+               ORDER BY due_at NULLS LAST LIMIT 20""",
+            (user["id"], hours),
+        ).fetchall()
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(), "period_hours": hours,
+        "provider": "deterministic", "summary": "Briefing based on your saved tasks. AI email analysis is not enabled on the hosted backend.",
+        "counts": {"tasks_due": len(tasks)},
+        "important_emails": [], "tasks_due_today_or_overdue": [_task_from_row(row) for row in tasks],
+        "next_steps": [f"Review task: {row['title']}" for row in tasks[:5]],
+    }
+
+
+@app.post("/api/v1/emails/{message_id}/summarize")
+async def summarize_email_unavailable(
+    message_id: str,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    _current_user(session)
+    raise HTTPException(503, "Email summarization needs an AI provider configured for the hosted backend. No summary was fabricated.")
+
+
+@app.post("/api/v1/emails/{message_id}/analyze")
+async def analyze_email_unavailable(
+    message_id: str,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    _current_user(session)
+    raise HTTPException(503, "Email analysis needs an AI provider configured for the hosted backend. No analysis was fabricated.")
+
+
+@app.post("/api/v1/chat")
+async def chat_unavailable(
+    body: dict[str, Any],
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    _current_user(session)
+    raise HTTPException(503, "Chat needs an AI provider configured for the hosted backend. No placeholder answer was generated.")
+
+
+@app.post("/api/v1/emails/{message_id}/draft-reply")
+async def draft_reply_unavailable(
+    message_id: str,
+    body: dict[str, Any],
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    _current_user(session)
+    raise HTTPException(503, "AI reply drafting needs an AI provider configured for the hosted backend. No draft was created.")
 
 
 @app.get("/")

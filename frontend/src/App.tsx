@@ -74,6 +74,9 @@ export default function App() {
   const [backendOnline, setBackendOnline] = useState(false);
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [authStatusUnavailable, setAuthStatusUnavailable] = useState(false);
+  const [bridgeUrl, setBridgeUrl] = useState('');
+  const [bridgeSecret, setBridgeSecret] = useState('');
+  const [bridgeConnecting, setBridgeConnecting] = useState(false);
   const [modelStatusUnavailable, setModelStatusUnavailable] = useState(false);
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
   const [insights, setInsights] = useState<Insights | null>(null);
@@ -488,7 +491,7 @@ export default function App() {
       } while (pageToken && pages < 3);
       await loadCore(false);
       const more = pageToken ? ' · more messages remain; sync again to continue' : '';
-      notify(`Sync complete · ${fetched} fetched, ${stored} indexed${more}.`, errors.length ? 'info' : 'success');
+      notify(`Sync complete · ${fetched} fetched, ${stored} indexed${stored === 0 ? ' (live-only; persistent email indexing is not enabled yet)' : ''}${more}.`, errors.length ? 'info' : 'success');
     } catch (error) { notify(errorText(error), 'error'); }
     finally { setBusy(null); }
   };
@@ -985,6 +988,29 @@ export default function App() {
     finally { setBusy(null); }
   };
 
+  const connectAppsScriptBridge = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!bridgeUrl.trim() || bridgeSecret.length < 32) {
+      notify('Enter your Apps Script /exec URL and its 32+ character bridge secret.', 'error');
+      return;
+    }
+    setBridgeConnecting(true);
+    try {
+      const result = await api<{ connected: boolean; email: string; message: string }>('/apps-script/login', {
+        method: 'POST',
+        body: JSON.stringify({ bridge_url: bridgeUrl.trim(), bridge_secret: bridgeSecret }),
+      });
+      setBridgeSecret('');
+      setAuth({ connected: result.connected, email: result.email, message: result.message });
+      notify(`Connected Apps Script mailbox: ${result.email}`);
+      await refreshAll();
+    } catch (error) {
+      notify(errorText(error), 'error');
+    } finally {
+      setBridgeConnecting(false);
+    }
+  };
+
   const openLogin = () => {
     // OAuth must be a top-level navigation so the same-origin Vercel API proxy can
     // set the session cookie before Google redirects back to the application.
@@ -1065,7 +1091,13 @@ export default function App() {
 
         {!backendOnline && !loading && <div className="connection-banner error-banner"><CircleAlert size={17} /><div><strong>Backend unavailable</strong><span>Start the Python API at <code>127.0.0.1:8000</code>, then refresh this page.</span></div><button className="text-button" onClick={() => void refreshAll()}>Retry</button></div>}
         {backendOnline && authStatusUnavailable && <div className="connection-banner status-warning-banner"><CircleAlert size={17} /><div><strong>Gmail status couldn't be verified</strong><span>The backend is responding, but its auth-status check failed. Retry before reconnecting so we don't mislabel a connected account.</span></div><button className="text-button" onClick={() => void refreshAll()}>Retry status</button></div>}
-        {backendOnline && !authStatusUnavailable && auth && !auth.connected && <div className="connection-banner"><Mail size={17} /><div><strong>Connect your Gmail account</strong><span>{auth.message || 'Connect Gmail to populate your inbox with live messages.'}</span></div><button className="small-primary" onClick={() => void openLogin()}>Connect Gmail <ExternalLink size={13} /></button></div>}
+        {backendOnline && !authStatusUnavailable && auth && !auth.connected && <div className="connection-banner"><Mail size={17} /><div><strong>Connect Gmail through Apps Script</strong><span>{auth?.message || 'Connect your personal Apps Script deployment.'}</span></div></div>}
+        {backendOnline && !authStatusUnavailable && auth && !auth.connected && (auth.message?.toLowerCase().includes('signed in.') || auth.message?.toLowerCase().startsWith('sign in')) && <form className="connection-banner" onSubmit={(event) => void connectAppsScriptBridge(event)} style={{ alignItems: 'stretch', flexWrap: 'wrap' }}>
+          <div style={{ flexBasis: '100%' }}><strong>Your personal Apps Script bridge</strong><span>Use your own Apps Script web-app /exec URL and its BRIDGE_SECRET from Script Properties. The secret authenticates your mailbox through your personal deployment, is sent over HTTPS, and is stored encrypted.</span></div>
+          <input aria-label="Apps Script web app URL" type="url" required placeholder="https://script.google.com/macros/s/.../exec" value={bridgeUrl} onChange={(event) => setBridgeUrl(event.target.value)} autoComplete="url" />
+          <input aria-label="Apps Script bridge secret" type="password" required minLength={32} placeholder="Bridge secret (32+ characters)" value={bridgeSecret} onChange={(event) => setBridgeSecret(event.target.value)} autoComplete="new-password" />
+          <button className="small-primary" type="submit" disabled={bridgeConnecting}>{bridgeConnecting ? 'Verifying…' : 'Verify & connect'}</button>
+        </form>}
 
         <div className="page-content">
           {view === 'analytics' && <BusinessAnalyticsView
