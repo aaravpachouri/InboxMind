@@ -85,6 +85,8 @@ def test_apps_script_body_normalization_uses_plain_text_and_reports_truncation()
     assert "parsed.html !== null ? htmlToPlainText_(parsed.html)" in source
     assert "body_truncated: truncated" in source
     assert "MAX_BODY_LENGTH = 500000" in source
+    assert "serializeMessage_(full, labelMap, false)" in source
+    assert "serializeMessage_(message, getLabelMap_())" in source
 
 
 def test_ai_job_content_is_encrypted_before_database_storage_and_decrypted_for_worker() -> None:
