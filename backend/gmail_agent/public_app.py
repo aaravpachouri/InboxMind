@@ -1448,6 +1448,7 @@ async def summarize_email_unavailable(
     session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> dict[str, Any]:
     user = _current_user(session)
+    _require_csrf(request, user)
     email = await _get_bridge_email(user, message_id)
     messages = _email_messages(
         email,
