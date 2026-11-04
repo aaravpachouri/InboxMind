@@ -1124,7 +1124,8 @@ def hosted_model_status(session: str | None = Cookie(default=None, alias=SESSION
     worker = _worker_for_user(str(user["id"]))
     if not worker:
         return {"available": False, "provider": "local-worker", "model": None,
-                "installed_models": [], "detail": "Register your Windows PC as the private AI worker in Settings."}
+                "installed_models": [], "worker_online": False, "worker_registered": False,
+                "detail": "Register your Windows PC as the private AI worker in Settings."}
     seen = worker.get("last_seen_at")
     fresh = bool(seen and (datetime.now(timezone.utc) - seen).total_seconds() <= 75)
     available = bool(fresh and worker.get("model_available"))
@@ -1136,7 +1137,7 @@ def hosted_model_status(session: str | None = Cookie(default=None, alias=SESSION
         "model": worker.get("model_name") or None, "installed_models": models,
         "detail": "Private Windows worker and local Ollama model are ready." if available
                   else "Windows AI worker is offline or the configured Ollama model is unavailable.",
-        "worker_online": fresh, "device_name": worker.get("device_name"),
+        "worker_online": fresh, "worker_registered": True, "device_name": worker.get("device_name"),
     }
 
 
