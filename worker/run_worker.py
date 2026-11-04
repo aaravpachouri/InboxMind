@@ -23,8 +23,11 @@ POLL_SECONDS = 2
 def api_base() -> str:
     value = os.environ.get("INBOXMIND_API_BASE", DEFAULT_API_BASE).strip().rstrip("/")
     parsed = urlparse(value)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise RuntimeError("InboxMind API base must be HTTPS.")
+    allowed_hosts = {"inboxmind-aaravpachouri.vercel.app", "inboxmind-api-skqr.onrender.com"}
+    if (parsed.scheme != "https" or parsed.hostname not in allowed_hosts or
+            parsed.username or parsed.password or parsed.query or parsed.fragment or
+            parsed.path.rstrip("/") != "/api/v1"):
+        raise RuntimeError("InboxMind API base must be the trusted InboxMind HTTPS /api/v1 endpoint.")
     return value
 
 
