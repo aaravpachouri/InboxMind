@@ -943,12 +943,13 @@ async def _run_local_ai_job(user_id: str, job_type: str, messages: list[dict[str
     _require_online_ai_worker(user_id)
     pool = _pool_or_503()
     payload = {"messages": messages, "temperature": temperature, "format": "json" if job_type == "analyze_email" else ""}
+    encrypted_payload = _fernet().encrypt(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
     with pool.connection() as conn, conn.transaction():
         _set_user_context(conn, user_id)
         job = conn.execute(
             """INSERT INTO user_ai_jobs(user_id,job_type,payload,status)
-               VALUES (%s,%s,%s::jsonb,'queued') RETURNING id""",
-            (user_id, job_type, json.dumps(payload)),
+               VALUES (%s,%s,%s,'queued') RETURNING id""",
+            (user_id, job_type, encrypted_payload),
         ).fetchone()
     job_id = str(job["id"])
     deadline = time.monotonic() + timeout_seconds
@@ -963,7 +964,12 @@ async def _run_local_ai_job(user_id: str, job_type: str, messages: list[dict[str
             raise HTTPException(500, "Local AI job disappeared before completion.")
         if row["status"] == "completed":
             result = row.get("result") or {}
-            if isinstance(result, str):
+            if isinstance(result, (bytes, bytearray, memoryview)):
+                try:
+                    result = json.loads(_fernet().decrypt(bytes(result)).decode("utf-8"))
+                except (InvalidToken, ValueError, UnicodeDecodeError):
+                    raise HTTPException(503, "Encrypted AI result could not be decrypted; no content was exposed.") from None
+            elif isinstance(result, str):
                 result = json.loads(result)
             if not isinstance(result, dict) or not str(result.get("content", "")).strip():
                 raise HTTPException(502, "Local AI worker returned an empty response.")
@@ -1082,7 +1088,10 @@ def claim_ai_worker_job(authorization: str | None = Header(default=None)) -> dic
                RETURNING id,job_type,payload,attempts""",
             (worker["id"], row["id"], worker["user_id"]),
         ).fetchone()
-    payload = updated["payload"] if isinstance(updated["payload"], dict) else json.loads(updated["payload"])
+    try:
+        payload = json.loads(_fernet().decrypt(bytes(updated["payload"])).decode("utf-8"))
+    except (InvalidToken, ValueError, UnicodeDecodeError):
+        raise HTTPException(503, "Encrypted AI job could not be decrypted; no email content was sent to the worker.") from None
     return {"job": {"id": str(updated["id"]), "type": updated["job_type"],
                     "payload": payload, "attempt": updated["attempts"]}}
 
@@ -1098,12 +1107,13 @@ def complete_ai_worker_job(
     with pool.connection() as conn, conn.transaction():
         _set_user_context(conn, str(worker["user_id"]))
         if body.success:
+            encrypted_result = _fernet().encrypt(json.dumps(body.result, ensure_ascii=False).encode("utf-8"))
             row = conn.execute(
-                """UPDATE user_ai_jobs SET status='completed',result=%s::jsonb,error='',
+                """UPDATE user_ai_jobs SET status='completed',result=%s,error='',
                           updated_at=now(),completed_at=now(),lease_until=NULL
                    WHERE id=%s AND user_id=%s AND worker_id=%s AND status='leased'
                    RETURNING id""",
-                (json.dumps(body.result), job_id, worker["user_id"], worker["id"]),
+                (encrypted_result, job_id, worker["user_id"], worker["id"]),
             ).fetchone()
         else:
             row = conn.execute(
