@@ -72,6 +72,8 @@ def test_worker_queue_migration_has_tenant_isolation_and_lease_fields() -> None:
     assert "user_ai_workers" in migration
     assert "user_ai_jobs" in migration
     assert "lease_until" in migration
+    assert "payload BYTEA NOT NULL" in migration
+    assert "result BYTEA" in migration
     assert "FORCE ROW LEVEL SECURITY" in migration
     assert "user_ai_jobs_tenant_isolation" in migration
 
@@ -83,6 +85,15 @@ def test_apps_script_body_normalization_uses_plain_text_and_reports_truncation()
     assert "parsed.html !== null ? htmlToPlainText_(parsed.html)" in source
     assert "body_truncated: truncated" in source
     assert "MAX_BODY_LENGTH = 500000" in source
+
+
+def test_ai_job_content_is_encrypted_before_database_storage_and_decrypted_for_worker() -> None:
+    submit = inspect.getsource(public_app._run_local_ai_job)
+    claim = inspect.getsource(public_app.claim_ai_worker_job)
+    complete = inspect.getsource(public_app.complete_ai_worker_job)
+    assert "_fernet().encrypt(json.dumps(payload" in submit
+    assert "_fernet().decrypt(bytes(updated[\"payload\"]))" in claim
+    assert "_fernet().encrypt(json.dumps(body.result" in complete
 
 
 def test_windows_worker_keeps_ollama_on_loopback_and_uses_credential_manager() -> None:
