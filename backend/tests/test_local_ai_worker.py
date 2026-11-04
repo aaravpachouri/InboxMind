@@ -34,6 +34,14 @@ def test_worker_auth_rejects_missing_or_malformed_bearer_before_database_access(
         assert error.value.status_code == 401
 
 
+def test_ai_jobs_respect_the_per_user_ai_enabled_setting() -> None:
+    source = inspect.getsource(public_app._run_local_ai_job)
+    gate = inspect.getsource(public_app._require_ai_enabled)
+    assert "_require_ai_enabled(user_id)" in source
+    assert 'settings.get("ai_enabled") is not True' in gate
+    assert "HTTPException(403" in gate
+
+
 def test_ai_fails_closed_when_worker_is_not_registered(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(public_app, "_worker_for_user", lambda _user_id: None)
     with pytest.raises(HTTPException) as error:
