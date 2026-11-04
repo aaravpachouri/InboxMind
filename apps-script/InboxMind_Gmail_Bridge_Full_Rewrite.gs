@@ -164,7 +164,7 @@ function listEmails_(p) {
     const full = withGmailRetry_("fetch message", function () {
       return Gmail.Users.Messages.get(USER_ID, messages[i].id, { format: "full" });
     });
-    items.push(serializeMessage_(full, labelMap));
+    items.push(serializeMessage_(full, labelMap, false));
     if (i < messages.length - 1) Utilities.sleep(250);
   }
   return {
@@ -281,7 +281,7 @@ function htmlToPlainText_(html) {
   return decodeHtmlEntities_(text).trim();
 }
 
-function serializeMessage_(message, labelMap) {
+function serializeMessage_(message, labelMap, includeBody) {
   const headers = getHeaderMap_(message);
   const payload = message.payload || {};
   const parsed = { text: null, html: null, attachments: [] };
@@ -290,9 +290,9 @@ function serializeMessage_(message, labelMap) {
     return labelMap[id] || id;
   });
 
-  const sourceBody = parsed.text !== null
+  const sourceBody = includeBody === false ? "" : (parsed.text !== null
     ? String(parsed.text)
-    : parsed.html !== null ? htmlToPlainText_(parsed.html) : "";
+    : parsed.html !== null ? htmlToPlainText_(parsed.html) : "");
   const truncated = sourceBody.length > MAX_BODY_LENGTH;
   const body = sourceBody.slice(0, MAX_BODY_LENGTH);
   let internalDate = "";
