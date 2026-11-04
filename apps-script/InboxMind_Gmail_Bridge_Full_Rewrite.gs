@@ -210,7 +210,7 @@ function decodeBodyData_(data) {
   }
 }
 
-function walkMimeParts_(part, output) {
+function walkMimeParts_(part, output, includeBody) {
   if (!part) return;
   if (part.filename && part.body && part.body.attachmentId) {
     output.attachments.push({
@@ -222,14 +222,14 @@ function walkMimeParts_(part, output) {
     });
   }
   const data = part.body && part.body.data;
-  if (data) {
+  if (data && includeBody !== false) {
     const mimeType = String(part.mimeType || "").toLowerCase();
     const text = decodeBodyData_(data);
     if (mimeType === "text/plain" && output.text === null) output.text = text;
     else if (mimeType === "text/html" && output.html === null) output.html = text;
   }
   (part.parts || []).forEach(function (child) {
-    walkMimeParts_(child, output);
+    walkMimeParts_(child, output, includeBody);
   });
 }
 
@@ -285,7 +285,7 @@ function serializeMessage_(message, labelMap, includeBody) {
   const headers = getHeaderMap_(message);
   const payload = message.payload || {};
   const parsed = { text: null, html: null, attachments: [] };
-  walkMimeParts_(payload, parsed);
+  walkMimeParts_(payload, parsed, includeBody !== false);
   const labels = (message.labelIds || []).map(function (id) {
     return labelMap[id] || id;
   });
