@@ -106,6 +106,10 @@ def health() -> dict[str, str]:
 
 
 
+class BridgeConnectRequest(BaseModel):
+    bridge_url: str = Field(min_length=1, max_length=500)
+    bridge_secret: str = Field(min_length=32, max_length=500)
+
 @app.post("/api/v1/apps-script/login")
 async def apps_script_login(
     body: BridgeConnectRequest,
@@ -276,9 +280,6 @@ def logout(request: Request, response: Response,
     return {"ok": True}
 
 
-class BridgeConnectRequest(BaseModel):
-    bridge_url: str = Field(min_length=1, max_length=500)
-    bridge_secret: str = Field(min_length=32, max_length=500)
 
 
 def _validate_bridge_url(value: str) -> str:
