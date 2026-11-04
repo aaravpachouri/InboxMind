@@ -475,6 +475,11 @@ input, textarea, select { color: var(--ink); }
 .model-setting select { max-width: 380px; }
 .model-status { display: flex; align-items: center; gap: 7px; margin-top: 10px; color: #879486; font-size: 9px; }
 .setting-footnote { margin: 9px 0 0; color: #9ba49a; font-size: 9px; line-height: 1.6; }
+.worker-token-box { display: grid; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid #e6ecdf; border-radius: 10px; background: #f8faf5; }
+.worker-token-box label { color: #607260; font-size: 9px; font-weight: 800; }
+.worker-token-box input { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid #dce5d8; border-radius: 8px; background: #fff; color: #415742; font: 10px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.worker-token-box .button-secondary { justify-self: start; }
+
 .storage-row { display: grid; gap: 12px; }
 .storage-row > div { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 10px 0; border-bottom: 1px solid #edf0eb; }
 .storage-row > div:last-child { border-bottom: 0; }
