@@ -1070,7 +1070,7 @@ def claim_ai_worker_job(authorization: str | None = Header(default=None)) -> dic
                WHERE user_id=%s AND attempts < 3
                  AND (status='queued' OR (status='leased' AND lease_until < now()))
                ORDER BY created_at
-               FOR UPDATE SKIP LOCKED LIMIT 1""",
+               LIMIT 1 FOR UPDATE SKIP LOCKED""",
             (worker["user_id"],),
         ).fetchone()
         if not row:
