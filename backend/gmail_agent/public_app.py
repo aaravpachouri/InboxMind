@@ -1107,8 +1107,11 @@ def complete_ai_worker_job(
             ).fetchone()
         else:
             row = conn.execute(
-                """UPDATE user_ai_jobs SET status='failed',error=%s,updated_at=now(),
-                          completed_at=now(),lease_until=NULL
+                """UPDATE user_ai_jobs
+                   SET status=CASE WHEN attempts < 3 THEN 'queued' ELSE 'failed' END,
+                       error=%s,updated_at=now(),
+                       completed_at=CASE WHEN attempts < 3 THEN NULL ELSE now() END,
+                       worker_id=NULL,lease_until=NULL
                    WHERE id=%s AND user_id=%s AND worker_id=%s AND status='leased'
                    RETURNING id""",
                 (body.error[:1000] or "Local inference failed.", job_id, worker["user_id"], worker["id"]),
