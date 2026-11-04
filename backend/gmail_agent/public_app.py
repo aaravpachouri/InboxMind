@@ -1568,7 +1568,7 @@ async def draft_reply_unavailable(
     payload = {
         "to_addresses": [str(email.get("reply_to") or email.get("from_address") or "")],
         "cc_addresses": [], "bcc_addresses": [],
-        "subject": ("Re: " + str(email.get("subject") or "")).strip()[:998],
+        "subject": (str(email.get("subject") or "") if str(email.get("subject") or "").lower().startswith("re:") else "Re: " + str(email.get("subject") or "")).strip()[:998],
         "body_text": reply_body, "source_email_id": message_id, "ai_provider": "ollama",
     }
     pool = _pool_or_503()
