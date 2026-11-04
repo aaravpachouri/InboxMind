@@ -18,12 +18,12 @@ This worker runs Ollama on your own Windows PC and connects outward to InboxMind
    py -3.12 -m venv .venv
    .venv\Scripts\python.exe -m pip install -r requirements.txt
    ```
-4. Run the worker:
+4. On first run, start the worker and install its Windows sign-in task:
    ```powershell
-   .venv\Scripts\python.exe run_worker.py
+   .venv\Scripts\python.exe run_worker.py --install-autostart
    ```
-5. On first run, paste the one-time token when prompted. Input is hidden. The worker stores it in Windows Credential Manager for the current Windows account.
-6. Keep the worker window open. InboxMind Settings should report the worker and model online after its first heartbeat.
+5. Paste the one-time token when prompted. Input is hidden. The worker stores it in Windows Credential Manager for the current Windows account.
+6. Keep the worker window open for the current session. At future Windows sign-ins, Task Scheduler starts it automatically. InboxMind Settings should report the worker and model online after its first heartbeat.
 
 The default API URL is `https://inboxmind-aaravpachouri.vercel.app/api/v1`. To override it, set the user environment variable `INBOXMIND_API_BASE` to an HTTPS `/api/v1` endpoint. To select another installed model, set `INBOXMIND_OLLAMA_MODEL` before starting the worker.
 
