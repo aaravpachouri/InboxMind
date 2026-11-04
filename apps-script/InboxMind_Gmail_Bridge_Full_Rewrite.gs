@@ -304,6 +304,7 @@ function serializeMessage_(message, labelMap) {
     from_address: headers.from || "",
     to_addresses: headers.to || "",
     cc_addresses: headers.cc || "",
+    reply_to: headers["reply-to"] || headers.from || "",
     subject: headers.subject || "(no subject)",
     snippet: decodeHtmlEntities_(message.snippet || body.slice(0, 200)),
     body_text: body,
