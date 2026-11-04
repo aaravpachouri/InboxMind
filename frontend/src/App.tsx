@@ -20,7 +20,7 @@ type Insights = {
   high_priority_count: number; open_tasks_count: number; overdue_tasks_count: number;
   category_counts?: Record<string, number>; recent_activity?: Array<Record<string, unknown>>; model_available?: boolean;
 };
-type ModelStatus = { available?: boolean; provider?: string; model?: string; installed_models?: string[]; detail?: string };
+type ModelStatus = { available?: boolean; provider?: string; model?: string; installed_models?: string[]; detail?: string; worker_online?: boolean; worker_registered?: boolean; device_name?: string };
 type CalendarEvent = { id: string; summary: string; description?: string; start?: string; end?: string; timezone?: string };
 type NotificationItem = { id: number; title?: string; message?: string; kind?: string; read_at?: string | null; created_at?: string };
 type MemoryItem = { id: number; category: string; key: string; value: string; created_at?: string; updated_at?: string };
@@ -81,6 +81,7 @@ export default function App() {
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
   const [insights, setInsights] = useState<Insights | null>(null);
   const [model, setModel] = useState<ModelStatus | null>(null);
+  const [workerToken, setWorkerToken] = useState<string | null>(null);
   const [emails, setEmails] = useState<EmailSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<EmailDetail | null>(null);
@@ -512,11 +513,12 @@ export default function App() {
     setBusy('analyze');
     try {
       const result = await api<{ analysis: Record<string, unknown>; tasks_created: number }>(`/emails/${encodeURIComponent(selectedId)}/analyze`, { method: 'POST', body: JSON.stringify({ force: true }) });
-      const updated = await api<EmailDetail>(`/emails/${encodeURIComponent(selectedId)}`);
-      setDetail(updated);
-      setEmails((prev) => prev.map((item) => item.id === selectedId ? { ...item, priority: String(result.analysis.priority || item.priority), category: String(result.analysis.category || item.category), ai_summary: String(result.analysis.summary || item.ai_summary) } : item));
+      setDetail((previous) => previous ? { ...previous, ai_analysis: result.analysis, ai_summary: String(result.analysis.summary || previous.ai_summary || '') } : previous);
+      setEmails((previous) => previous.map((item) => item.id === selectedId
+        ? { ...item, priority: String(result.analysis.priority || item.priority), category: String(result.analysis.category || item.category), ai_summary: String(result.analysis.summary || item.ai_summary) }
+        : item));
       await loadTasks();
-      notify(`Analysis complete via ${String(result.analysis.provider || model?.provider || 'local AI')}. ${result.tasks_created || 0} new tasks added.`);
+      notify(`Analysis complete via ${String(result.analysis.provider || model?.provider || 'local AI')}.${' '}${result.tasks_created || 0} new tasks added.`);
     } catch (error) { notify(errorText(error), 'error'); }
     finally { setBusy(null); }
   };
@@ -546,6 +548,37 @@ export default function App() {
   };
 
   const confirmAndAct = (config: DialogConfig) => setDialog(config);
+
+  const registerLocalWorker = async () => {
+    setBusy('worker-register');
+    try {
+      const result = await api<{ token: string; registered: boolean }>('/ai/workers/register', {
+        method: 'POST', body: JSON.stringify({ device_name: 'Windows PC' }),
+      });
+      setWorkerToken(result.token);
+      const status = await api<ModelStatus>('/system/model');
+      setModel(status);
+      setModelStatusUnavailable(false);
+      notify('This PC is registered. Copy the one-time token into the Windows worker setup.');
+    } catch (error) { notify(errorText(error), 'error'); }
+    finally { setBusy(null); }
+  };
+
+  const revokeLocalWorker = () => confirmAndAct({
+    title: 'Revoke this private AI worker?',
+    description: 'The saved worker token will stop working immediately. You can register this PC again later.',
+    confirmLabel: 'Revoke worker', danger: true,
+    onConfirm: async () => {
+      setBusy('worker-revoke');
+      try {
+        await api('/ai/workers/revoke', { method: 'POST', body: JSON.stringify({ confirm: true }) });
+        setWorkerToken(null);
+        setModel(await api<ModelStatus>('/system/model'));
+        notify('The local AI worker token has been revoked.');
+      } catch (error) { notify(errorText(error), 'error'); }
+      finally { setBusy(null); }
+    },
+  });
 
   const archiveEmail = (item: EmailSummary) => confirmAndAct({
     title: 'Archive this conversation?', description: `“${item.subject}” will leave your Inbox but remain searchable in Gmail.`, confirmLabel: 'Archive email',
@@ -1134,7 +1167,7 @@ export default function App() {
           {view === 'files' && <FilesView fileSearch={fileSearch} setFileSearch={setFileSearch} results={fileResults} indexStats={indexStats} busy={busy} onSearch={searchLocalFiles} onIndex={indexLocalFiles} />}
           {view === 'business' && <BusinessProfileView memories={memories} busy={busy} onSave={saveMemory} onRefresh={refreshMemories} />}
           {view === 'memory' && <MemoryView memories={memories} feedbackItems={feedbackItems} busy={busy} onSaveMemory={saveMemory} onDeleteMemory={deleteMemory} onSubmitFeedback={submitFeedback} />}
-          {view === 'settings' && <SettingsView auth={auth} health={health} model={model} settings={settings} busy={busy} authStatusUnavailable={authStatusUnavailable} modelStatusUnavailable={modelStatusUnavailable} onConnect={openLogin} onRefresh={refreshAll} onUpdate={updateSetting} />}
+          {view === 'settings' && <SettingsView auth={auth} health={health} model={model} settings={settings} busy={busy} authStatusUnavailable={authStatusUnavailable} modelStatusUnavailable={modelStatusUnavailable} workerToken={workerToken} onConnect={openLogin} onRefresh={refreshAll} onUpdate={updateSetting} onRegisterWorker={registerLocalWorker} onRevokeWorker={revokeLocalWorker} />}
         </div>
 
         <footer className="app-footer"><span><span className={cx('status-dot', backendOnline ? 'green' : 'red')} /> {backendOnline ? 'Local backend connected' : 'Backend offline'}</span><span><ShieldCheck size={13} /> Local-first · no paid AI APIs</span><span>API <code>{API_BASE.replace('/api/v1', '')}</code></span></footer>
@@ -1727,7 +1760,7 @@ function MemoryView({ memories, feedbackItems, busy, onSaveMemory, onDeleteMemor
   </div>;
 }
 
-function SettingsView({ auth, health, model, settings, busy, authStatusUnavailable, modelStatusUnavailable, onConnect, onRefresh, onUpdate }: { auth: AuthStatus | null; health: Record<string, unknown> | null; model: ModelStatus | null; settings: Record<string, unknown>; busy: string | null; authStatusUnavailable: boolean; modelStatusUnavailable: boolean; onConnect: () => void; onRefresh: () => void; onUpdate: (patch: Record<string, unknown>) => void }) {
+function SettingsView({ auth, health, model, settings, busy, authStatusUnavailable, modelStatusUnavailable, workerToken, onConnect, onRefresh, onUpdate, onRegisterWorker, onRevokeWorker }: { auth: AuthStatus | null; health: Record<string, unknown> | null; model: ModelStatus | null; settings: Record<string, unknown>; busy: string | null; authStatusUnavailable: boolean; modelStatusUnavailable: boolean; workerToken: string | null; onConnect: () => void; onRefresh: () => void; onUpdate: (patch: Record<string, unknown>) => void; onRegisterWorker: () => void; onRevokeWorker: () => void }) {
   const aiEnabled = settings.ai_enabled !== false;
   const autoSync = settings.auto_sync_enabled !== false;
   const interval = Number(settings.sync_interval_seconds || 300);
@@ -1737,6 +1770,19 @@ function SettingsView({ auth, health, model, settings, busy, authStatusUnavailab
     <div className="settings-layout"><div className="settings-main">
       <Panel title="Connected account" subtitle="The Gmail identity the agent can access" icon={Mail}><div className="connected-account"><div className="connected-account-avatar"><Mail size={21} /></div><div className="connected-account-copy"><strong>{auth?.email || (authStatusUnavailable ? 'Gmail status unavailable' : 'No Gmail account connected')}</strong><span>{authStatusUnavailable ? 'The backend could not verify the bridge status. Retry before changing account authorization.' : auth?.connected ? 'Authorized through your local Google Apps Script bridge' : auth?.message || 'Connect an account to start working with live email.'}</span></div><Badge value={authStatusUnavailable ? 'Unknown' : auth?.connected ? 'Connected' : 'Not connected'} kind={authStatusUnavailable ? 'amber' : auth?.connected ? 'green' : 'amber'} /></div><div className="settings-row-action">{authStatusUnavailable ? <button className="button-secondary small" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={14} /> Retry connection check</button> : auth?.connected ? <p>Scopes: <code>{(auth.scopes || []).join(', ') || 'managed by local bridge'}</code></p> : /apps script bridge/i.test(auth?.message || '') ? <button className="button-secondary small" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={14} /> Check bridge setup</button> : <button className="button-primary small" onClick={onConnect}><ExternalLink size={14} /> Connect Gmail</button>}</div></Panel>
       <Panel title="Local AI engine" subtitle="Inference stays on this machine when Ollama is active" icon={BrainCircuit}><div className="setting-toggle-row"><div className="setting-row-icon lilac"><Sparkles size={17} /></div><div className="setting-description"><strong>Enable AI analysis</strong><p>Allow the local model to summarize and reason over email that you request it to process.</p></div><Toggle value={aiEnabled} disabled={busy === 'settings'} onChange={(value) => onUpdate({ ai_enabled: value })} /></div><div className="model-setting"><label>Preferred Ollama model<select value={currentModel} onChange={(event) => onUpdate({ ollama_model: event.target.value })} disabled={busy === 'settings'}>{[...new Set([currentModel, ...models])].map((name) => <option key={name} value={name}>{name}</option>)}</select></label><div className="model-status"><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /><span>{modelStatusUnavailable ? 'Model status could not be checked. Refresh before changing model settings.' : model?.available ? `Ready · ${model.provider || 'Ollama'}` : model?.detail || 'Local model unavailable; heuristic fallback is in use.'}</span></div></div></Panel>
+      <Panel title="Private Windows AI worker" subtitle="Run Ollama on your own PC; this dashboard sends jobs over an authenticated outbound connection." icon={BrainCircuit}>
+        <div className="model-setting">
+          <div className="model-status"><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /><span>{model?.worker_online ? `Worker online · ${model.model || 'Ollama'}` : model?.worker_registered ? 'Worker registered · PC currently offline' : 'No private worker registered'}</span></div>
+          <p className="setting-footnote">{model?.detail || 'Register this PC to enable local AI. Ollama is never exposed to the public internet.'}</p>
+          {workerToken && <div className="worker-token-box"><label>One-time worker token</label><input type="text" readOnly value={workerToken} onFocus={(event) => event.currentTarget.select()} /><button className="button-secondary small" onClick={() => { void navigator.clipboard.writeText(workerToken).then(() => notify('Worker token copied.')).catch(() => notify('Select and copy the token manually.', 'info')); }}>Copy token</button><p className="setting-footnote">This token is shown once. Paste it into the Windows worker setup prompt. Never share it or commit it.</p></div>}
+          <div className="settings-row-action">
+            {!model?.worker_registered
+              ? <button className="button-primary small" onClick={onRegisterWorker} disabled={busy === 'worker-register'}>{busy === 'worker-register' ? 'Registering…' : 'Register this PC'}</button>
+              : <button className="button-secondary small" onClick={onRevokeWorker} disabled={busy === 'worker-revoke'}>{busy === 'worker-revoke' ? 'Revoking…' : 'Revoke worker'}</button>}
+          </div>
+          <p className="setting-footnote">Run <code>worker\\run_worker.py</code> from the repository's worker folder. Setup instructions are in <code>worker\\README.md</code>.</p>
+        </div>
+      </Panel>
       <Panel title="Background monitoring" subtitle="Routine sync can run while your local backend is running" icon={Activity}><div className="setting-toggle-row"><div className="setting-row-icon mint"><RefreshCw size={17} /></div><div className="setting-description"><strong>Automatic inbox sync</strong><p>Sync and index messages periodically. Background sync never sends, trashes, or archives messages.</p></div><Toggle value={autoSync} disabled={busy === 'settings'} onChange={(value) => onUpdate({ auto_sync_enabled: value })} /></div><div className="model-setting"><label>Sync interval<select value={String(interval)} onChange={(event) => onUpdate({ sync_interval_seconds: Number(event.target.value) })} disabled={busy === 'settings'}><option value="300">Every 5 minutes</option><option value="600">Every 10 minutes</option><option value="1800">Every 30 minutes</option><option value="3600">Every hour</option></select></label><p className="setting-footnote">This affects future worker cycles. Your computer and backend must remain on.</p></div></Panel>
       <Panel title="Local storage" subtitle="Data files created by your backend" icon={FolderOpen}><div className="storage-row"><div><span>Database</span><strong>{String(health?.database || 'Local SQLite')}</strong></div><div><span>Local files folder</span><strong>{String(settings.local_files_dir || './local_files')}</strong></div><div><span>Data directory</span><strong>{String(settings.data_dir || './data')}</strong></div></div></Panel>
     </div><div className="settings-aside"><div className="privacy-card"><div className="privacy-card-icon"><ShieldCheck size={21} /></div><h3>Private by default.</h3><p>The dashboard runs on localhost and calls your local backend. Email data isn't sent to a paid AI API by this interface.</p><div className="privacy-checks"><span><CheckCircle2 size={14} /> Local Ollama mode</span><span><CheckCircle2 size={14} /> Explicit send approval</span><span><CheckCircle2 size={14} /> Trash, not permanent delete</span><span><CheckCircle2 size={14} /> API binds to loopback</span></div></div><Panel title="Runtime health" icon={Gauge}><div className="runtime-list"><RuntimeRow label="Backend" value={health ? 'Online' : 'Unknown'} ok={Boolean(health)} /><RuntimeRow label="Gmail bridge" value={authStatusUnavailable ? 'Unknown' : auth?.connected ? 'Connected' : 'Not connected'} ok={Boolean(auth?.connected && !authStatusUnavailable)} /><RuntimeRow label="Local model" value={modelStatusUnavailable ? 'Unknown' : model?.available ? 'Ready' : model ? 'Fallback' : 'Checking'} ok={Boolean(model?.available && !modelStatusUnavailable)} /><RuntimeRow label="Background sync" value={autoSync ? 'Enabled' : 'Paused'} ok={autoSync} /><RuntimeRow label="Data location" value="This device" ok /></div></Panel><div className="settings-warning"><CircleAlert size={16} /><p><strong>Protect local files.</strong> Email index data and preferences are stored in your local backend database. Use your operating system's disk encryption and protect backups.</p></div></div></div>
