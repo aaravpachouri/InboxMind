@@ -1,4 +1,6 @@
-export const API_BASE = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/$/, '');
+// Keep API calls same-origin so the browser accepts the secure session and CSRF cookies
+// through the Vercel rewrite in frontend/vercel.json. Direct Render fetches are cross-site.
+export const API_BASE = '/api/v1';
 
 function cookieValue(name: string): string | undefined {
   const prefix = `${name}=`;
