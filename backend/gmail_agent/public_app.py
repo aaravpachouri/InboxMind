@@ -1465,6 +1465,7 @@ async def analyze_email_unavailable(
     session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> dict[str, Any]:
     user = _current_user(session)
+    _require_csrf(request, user)
     email = await _get_bridge_email(user, message_id)
     instruction = (
         "Analyze this email and return JSON with keys: summary (max 2 sentences), "
@@ -1509,6 +1510,7 @@ async def chat_unavailable(
     session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> dict[str, Any]:
     user = _current_user(session)
+    _require_csrf(request, user)
     message = str(body.get("message", "")).strip()
     if not message:
         raise HTTPException(422, "A message is required.")
