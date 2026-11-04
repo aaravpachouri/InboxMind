@@ -95,7 +95,10 @@ def test_hosted_core_routes_cover_frontend_persistence_operations() -> None:
     assert expected.issubset(routes)
 
 
-def test_unavailable_ai_endpoints_do_not_claim_fake_results() -> None:
+def test_ai_summary_is_dispatched_only_to_the_private_worker() -> None:
     source = inspect.getsource(public_app.summarize_email_unavailable)
-    assert "No summary was fabricated" in source
-    assert "HTTPException(503," in source
+    assert "_run_local_ai_job" in source
+    assert "_require_csrf" in source
+    worker_gate = inspect.getsource(public_app._require_online_ai_worker)
+    assert "HTTPException(503" in worker_gate
+    assert "no AI result was fabricated" in worker_gate
