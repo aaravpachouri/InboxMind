@@ -928,6 +928,16 @@ def _worker_for_user(user_id: str) -> dict[str, Any] | None:
         ).fetchone()
 
 
+def _require_ai_enabled(user_id: str) -> None:
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, user_id)
+        row = conn.execute("SELECT settings FROM user_settings WHERE user_id=%s", (user_id,)).fetchone()
+    settings = row.get("settings") if row and isinstance(row.get("settings"), dict) else {}
+    if settings.get("ai_enabled") is not True:
+        raise HTTPException(403, "AI is disabled in Settings. Enable AI analysis to use your private Windows worker.")
+
+
 def _require_online_ai_worker(user_id: str) -> dict[str, Any]:
     worker = _worker_for_user(user_id)
     if not worker:
@@ -940,6 +950,7 @@ def _require_online_ai_worker(user_id: str) -> dict[str, Any]:
 
 async def _run_local_ai_job(user_id: str, job_type: str, messages: list[dict[str, str]],
                             temperature: float = 0.2, timeout_seconds: int = 90) -> dict[str, Any]:
+    _require_ai_enabled(user_id)
     _require_online_ai_worker(user_id)
     pool = _pool_or_503()
     payload = {"messages": messages, "temperature": temperature, "format": "json" if job_type == "analyze_email" else ""}
