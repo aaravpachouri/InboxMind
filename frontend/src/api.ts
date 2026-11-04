@@ -28,6 +28,8 @@ export type EmailSummary = {
 export type EmailDetail = EmailSummary & {
   cc_addresses?: string;
   body_text?: string;
+  body_format?: 'plain' | 'html';
+  body_truncated?: boolean;
   attachment_metadata?: Array<{ attachment_id: string; filename: string; mime_type?: string; size?: number }>;
   ai_analysis?: Record<string, unknown>;
   raw_headers?: Record<string, string>;
