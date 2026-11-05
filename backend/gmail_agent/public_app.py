@@ -928,13 +928,17 @@ def _worker_for_user(user_id: str) -> dict[str, Any] | None:
         ).fetchone()
 
 
-def _require_ai_enabled(user_id: str) -> None:
+def _user_ai_enabled(user_id: str) -> bool:
     pool = _pool_or_503()
     with pool.connection() as conn, conn.transaction():
         _set_user_context(conn, user_id)
         row = conn.execute("SELECT settings FROM user_settings WHERE user_id=%s", (user_id,)).fetchone()
     settings = row.get("settings") if row and isinstance(row.get("settings"), dict) else {}
-    if settings.get("ai_enabled") is not True:
+    return settings.get("ai_enabled") is True
+
+
+def _require_ai_enabled(user_id: str) -> None:
+    if not _user_ai_enabled(user_id):
         raise HTTPException(403, "AI is disabled in Settings. Enable AI analysis to use your private Windows worker.")
 
 
@@ -1145,22 +1149,36 @@ def complete_ai_worker_job(
 @app.get("/api/v1/system/model")
 def hosted_model_status(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
+    ai_enabled = _user_ai_enabled(str(user["id"]))
     worker = _worker_for_user(str(user["id"]))
     if not worker:
-        return {"available": False, "provider": "local-worker", "model": None,
+        detail = (
+            "AI analysis is disabled in Settings. Enable it to use your private Windows worker."
+            if not ai_enabled else
+            "Register your Windows PC as the private AI worker in Settings."
+        )
+        return {"available": False, "ai_enabled": ai_enabled, "provider": "local-worker", "model": None,
                 "installed_models": [], "worker_online": False, "worker_registered": False,
-                "detail": "Register your Windows PC as the private AI worker in Settings."}
+                "detail": detail}
     seen = worker.get("last_seen_at")
     fresh = bool(seen and (datetime.now(timezone.utc) - seen).total_seconds() <= 75)
     available = bool(fresh and worker.get("model_available"))
     models = worker.get("installed_models") or []
     if isinstance(models, str):
         models = json.loads(models)
+    if not ai_enabled:
+        detail = "AI analysis is disabled in Settings. Enable it to use your private Windows worker."
+    elif available:
+        detail = "Private Windows worker and local Ollama model are ready."
+    elif not fresh:
+        detail = "Private Windows AI worker is offline. Start the worker on your PC and wait for its heartbeat."
+    else:
+        detail = "Worker is online, but the configured Ollama model is unavailable on this PC."
     return {
-        "available": available, "provider": "ollama" if available else "local-worker",
+        "available": available, "ai_enabled": ai_enabled,
+        "provider": "ollama" if available else "local-worker",
         "model": worker.get("model_name") or None, "installed_models": models,
-        "detail": "Private Windows worker and local Ollama model are ready." if available
-                  else "Windows AI worker is offline or the configured Ollama model is unavailable.",
+        "detail": detail,
         "worker_online": fresh, "worker_registered": True, "device_name": worker.get("device_name"),
     }
 
