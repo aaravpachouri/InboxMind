@@ -42,6 +42,13 @@ def test_ai_jobs_respect_the_per_user_ai_enabled_setting() -> None:
     assert "HTTPException(403" in gate
 
 
+def test_model_status_reports_ai_opt_in_separately_from_worker_health() -> None:
+    source = inspect.getsource(public_app.hosted_model_status)
+    assert "_user_ai_enabled" in source
+    assert '"ai_enabled": ai_enabled' in source
+    assert "AI analysis is disabled in Settings" in source
+
+
 def test_ai_fails_closed_when_worker_is_not_registered(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(public_app, "_worker_for_user", lambda _user_id: None)
     with pytest.raises(HTTPException) as error:
