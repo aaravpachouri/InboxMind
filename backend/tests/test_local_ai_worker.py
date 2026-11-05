@@ -36,10 +36,12 @@ def test_worker_auth_rejects_missing_or_malformed_bearer_before_database_access(
 
 def test_ai_jobs_respect_the_per_user_ai_enabled_setting() -> None:
     source = inspect.getsource(public_app._run_local_ai_job)
-    gate = inspect.getsource(public_app._require_ai_enabled)
+    gate = inspect.getsource(public_app._user_ai_enabled)
+    enforcement = inspect.getsource(public_app._require_ai_enabled)
     assert "_require_ai_enabled(user_id)" in source
-    assert 'settings.get("ai_enabled") is not True' in gate
-    assert "HTTPException(403" in gate
+    assert 'settings.get("ai_enabled") is True' in gate
+    assert "if not _user_ai_enabled(user_id)" in enforcement
+    assert "HTTPException(403" in enforcement
 
 
 def test_model_status_reports_ai_opt_in_separately_from_worker_health() -> None:
