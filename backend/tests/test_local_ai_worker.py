@@ -48,6 +48,8 @@ def test_model_status_reports_ai_opt_in_separately_from_worker_health() -> None:
     source = inspect.getsource(public_app.hosted_model_status)
     assert "_user_ai_enabled" in source
     assert '"ai_enabled": ai_enabled' in source
+    assert '"worker_registered": False' in source
+    assert '"worker_registered": True' in source
     assert "AI analysis is disabled in Settings" in source
 
 
