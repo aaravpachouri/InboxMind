@@ -1452,17 +1452,25 @@ async def daily_briefing(
     # Use the authenticated user's own Apps Script bridge. The bridge returns a
     # maximum of ten messages per page; keep this endpoint bounded and explicit.
     bridge = _get_user_bridge(user)
-    page = await _bridge_request(
-        bridge["bridge_url"], bridge["bridge_secret"], "list_emails",
-        {"max_results": 10, "query": f"in:anywhere newer_than:{max(1, (hours + 23) // 24)}d", "page_token": "0"},
-    )
-    if not isinstance(page, dict) or not isinstance(page.get("items", []), list):
-        raise HTTPException(502, "Apps Script bridge returned an invalid briefing email page.")
+    query = f"in:anywhere newer_than:{max(1, (hours + 23) // 24)}d"
+    listed: list[dict[str, Any]] = []
+    page_token = "0"
+    for _ in range(5):
+        page = await _bridge_request(
+            bridge["bridge_url"], bridge["bridge_secret"], "list_emails",
+            {"max_results": 10, "query": query, "page_token": page_token},
+        )
+        if not isinstance(page, dict) or not isinstance(page.get("items", []), list):
+            raise HTTPException(502, "Apps Script bridge returned an invalid briefing email page.")
+        listed.extend(item for item in page.get("items", []) if isinstance(item, dict))
+        page_token = str(page.get("next_page_token") or "")
+        if not page_token:
+            break
 
     now = datetime.now(timezone.utc)
     cutoff = now - timedelta(hours=hours)
     recent: list[dict[str, Any]] = []
-    for item in page.get("items", []):
+    for item in listed:
         if not isinstance(item, dict) or not item.get("id"):
             continue
         raw_date = item.get("internal_date")
