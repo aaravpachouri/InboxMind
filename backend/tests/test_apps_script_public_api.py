@@ -102,3 +102,20 @@ def test_ai_summary_is_dispatched_only_to_the_private_worker() -> None:
     worker_gate = inspect.getsource(public_app._require_online_ai_worker)
     assert "HTTPException(503" in worker_gate
     assert "no AI result was fabricated" in worker_gate
+
+
+def test_daily_briefing_uses_per_user_gmail_bridge_and_private_worker() -> None:
+    source = inspect.getsource(public_app.daily_briefing)
+    assert '"list_emails"' in source
+    assert "_get_user_bridge(user)" in source
+    assert "_get_bridge_email(user" in source
+    assert '_run_local_ai_job(user_id, "analyze_email"' in source
+    assert '"emails_indexed_in_period"' in source
+    assert '"urgent_or_high"' in source
+    assert "AI email analysis is not enabled on the hosted backend" not in source
+
+
+def test_daily_briefing_rejects_invalid_worker_json_without_fabricating() -> None:
+    source = inspect.getsource(public_app.daily_briefing)
+    assert "Private AI worker returned invalid JSON" in source
+    assert "No result was fabricated" in source
