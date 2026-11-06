@@ -854,12 +854,13 @@ def create_app(settings: Settings | None = None, gmail: GmailClient | None = Non
                 logger.debug("Skipping email with unparseable internal_date in briefing")
         important = sorted(
             [item for item in emails if str(item.get("priority", "")).lower() in {"urgent", "high"}],
-            key=lambda item: (
-                0 if str(item.get("priority", "")).lower() == "urgent" else 1,
-                str(item.get("internal_date", "")),
-            ),
-            reverse=False,
-        )[:12]
+            key=lambda item: str(item.get("internal_date", "")),
+            reverse=True,
+        )
+        # Keep urgent messages ahead of high-priority messages without losing
+        # newest-first ordering inside each priority group.
+        important.sort(key=lambda item: 0 if str(item.get("priority", "")).lower() == "urgent" else 1)
+        important = important[:12]
         task_rows = s.tasks.list(status="open", limit=200)
         today = datetime.now(timezone.utc).date().isoformat()
         due_tasks = [
@@ -914,7 +915,7 @@ def create_app(settings: Settings | None = None, gmail: GmailClient | None = Non
             if not emails:
                 lines.append("No indexed emails were found in this time window. Sync the inbox to refresh the local index.")
             lines.append("This is a data-based fallback summary; Ollama-generated narrative was unavailable.")
-            narrative = "\\n".join(lines)
+            narrative = "\n".join(lines)
             provider = "local-summary"
 
         return {
