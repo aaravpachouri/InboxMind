@@ -1115,7 +1115,7 @@ export default function App() {
             onOpenTasks={() => go('tasks')}
           />}
           {view === 'overview' && <OverviewView
-            auth={auth} insights={insights} model={model} briefing={briefing} emails={emails} mailSource={mailSource} tasks={tasks} calendarEvents={calendarEvents}
+            auth={auth} insights={insights} model={model} briefing={briefing} briefingError={briefingError} emails={emails} mailSource={mailSource} tasks={tasks} calendarEvents={calendarEvents}
             backendOnline={backendOnline} loading={loading} authStatusUnavailable={authStatusUnavailable} modelStatusUnavailable={modelStatusUnavailable}
             mailboxLoading={mailboxLoading} mailboxError={mailboxError} onReloadInbox={() => { void loadEmails(gmailQuery, null, auth?.connected); }} onCompose={() => openWritingStudio('new')}
             onOpenEmail={selectEmail} onNavigate={go} onSync={runSync} syncBusy={busy === 'sync'} onRefreshAll={() => { void refreshAll(); }} refreshBusy={busy === 'refresh'} onRefreshBriefing={async () => {
@@ -1242,8 +1242,8 @@ function PriorityBadge({ value }: { value?: string }) {
 function LoadingLine({ label = 'Loading your workspace…' }: { label?: string }) { return <div className="loading-state"><LoaderCircle size={19} className="spin" /><span>{label}</span></div>; }
 function EmptyState({ icon: Icon = Inbox, title, detail, action }: { icon?: typeof Inbox; title: string; detail: string; action?: ReactNode }) { return <div className="empty-state"><div className="empty-icon"><Icon size={22} /></div><strong>{title}</strong><p>{detail}</p>{action}</div>; }
 
-function OverviewView({ auth, insights, model, briefing, emails, mailSource, tasks, calendarEvents, backendOnline, loading, authStatusUnavailable, modelStatusUnavailable, mailboxLoading, mailboxError, onReloadInbox, onCompose, onOpenEmail, onNavigate, onSync, syncBusy, onRefreshAll, refreshBusy, onRefreshBriefing, briefingBusy }: {
-  auth: AuthStatus | null; insights: Insights | null; model: ModelStatus | null; briefing: Briefing | null; emails: EmailSummary[]; mailSource: 'gmail' | 'cache' | null; tasks: TaskItem[]; calendarEvents: CalendarEvent[]; backendOnline: boolean; loading: boolean; authStatusUnavailable: boolean; modelStatusUnavailable: boolean; mailboxLoading: boolean; mailboxError: string | null;
+function OverviewView({ auth, insights, model, briefing, briefingError, emails, mailSource, tasks, calendarEvents, backendOnline, loading, authStatusUnavailable, modelStatusUnavailable, mailboxLoading, mailboxError, onReloadInbox, onCompose, onOpenEmail, onNavigate, onSync, syncBusy, onRefreshAll, refreshBusy, onRefreshBriefing, briefingBusy }: {
+  auth: AuthStatus | null; insights: Insights | null; model: ModelStatus | null; briefing: Briefing | null; briefingError: string | null; emails: EmailSummary[]; mailSource: 'gmail' | 'cache' | null; tasks: TaskItem[]; calendarEvents: CalendarEvent[]; backendOnline: boolean; loading: boolean; authStatusUnavailable: boolean; modelStatusUnavailable: boolean; mailboxLoading: boolean; mailboxError: string | null;
   onReloadInbox: () => void; onCompose: () => void; onOpenEmail: (item: EmailSummary) => void; onNavigate: (view: View) => void; onSync: () => void; syncBusy: boolean; onRefreshAll: () => void; refreshBusy: boolean; onRefreshBriefing: () => void; briefingBusy: boolean;
 }) {
   const priority = emails.filter((item) => ['urgent', 'high'].includes((item.priority || '').toLowerCase()));
