@@ -852,13 +852,18 @@ def create_app(settings: Settings | None = None, gmail: GmailClient | None = Non
                     emails.append(item)
             except (TypeError, ValueError):
                 logger.debug("Skipping email with unparseable internal_date in briefing")
+        priority_emails = [
+            item for item in emails
+            if str(item.get("priority", "")).lower() in {"urgent", "high"}
+        ]
         important = sorted(
-            [item for item in emails if str(item.get("priority", "")).lower() in {"urgent", "high"}],
+            priority_emails,
             key=lambda item: str(item.get("internal_date", "")),
             reverse=True,
         )
         # Keep urgent messages ahead of high-priority messages without losing
-        # newest-first ordering inside each priority group.
+        # newest-first ordering inside each priority group. The UI list is capped,
+        # but aggregate counts must always describe the full requested time window.
         important.sort(key=lambda item: 0 if str(item.get("priority", "")).lower() == "urgent" else 1)
         important = important[:12]
         task_rows = s.tasks.list(status="open", limit=200)
@@ -925,7 +930,7 @@ def create_app(settings: Settings | None = None, gmail: GmailClient | None = Non
             "summary": narrative,
             "counts": {
                 "emails_indexed_in_period": len(emails),
-                "urgent_or_high": len(important),
+                "urgent_or_high": len(priority_emails),
                 "unread_in_period": sum(1 for item in emails if item.get("is_unread")),
                 "open_tasks": task_summary["open_count"],
                 "overdue_tasks": task_summary["overdue_count"],
