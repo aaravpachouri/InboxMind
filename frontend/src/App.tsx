@@ -96,6 +96,7 @@ export default function App() {
   const [mailFilter, setMailFilter] = useState<'all' | 'new' | 'reply' | 'waiting' | 'important' | 'review' | 'low_priority' | 'attachments'>('all');
   const [tasks, setTasks] = useState<TaskItem[]>([]);
   const [briefing, setBriefing] = useState<Briefing | null>(null);
+  const [briefingError, setBriefingError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<DraftItem[]>([]);
   const [sentDraftHistory, setSentDraftHistory] = useState<DraftItem[] | null>(null);
   const [analyticsLoading, setAnalyticsLoading] = useState(false);
@@ -299,7 +300,8 @@ export default function App() {
         }
       }
       if (feedbackResult.status === 'fulfilled') setFeedbackItems(feedbackResult.value.items || []);
-      if (briefingResult.status === 'fulfilled') setBriefing(briefingResult.value);
+      if (briefingResult.status === 'fulfilled') { setBriefing(briefingResult.value); setBriefingError(null); }
+      else setBriefingError(errorText(briefingResult.reason));
     });
 
 
@@ -1117,7 +1119,7 @@ export default function App() {
             backendOnline={backendOnline} loading={loading} authStatusUnavailable={authStatusUnavailable} modelStatusUnavailable={modelStatusUnavailable}
             mailboxLoading={mailboxLoading} mailboxError={mailboxError} onReloadInbox={() => { void loadEmails(gmailQuery, null, auth?.connected); }} onCompose={() => openWritingStudio('new')}
             onOpenEmail={selectEmail} onNavigate={go} onSync={runSync} syncBusy={busy === 'sync'} onRefreshAll={() => { void refreshAll(); }} refreshBusy={busy === 'refresh'} onRefreshBriefing={async () => {
-              setBusy('briefing'); try { setBriefing(await api<Briefing>('/briefing/daily?hours=24')); notify('Briefing refreshed.'); } catch (error) { notify(errorText(error), 'error'); } finally { setBusy(null); }
+              setBusy('briefing'); try { setBriefing(await api<Briefing>('/briefing/daily?hours=24')); setBriefingError(null); notify('Briefing refreshed.'); } catch (error) { setBriefingError(errorText(error)); notify(errorText(error), 'error'); } finally { setBusy(null); }
             }} briefingBusy={busy === 'briefing'} />}
           {(view === 'inbox' || view === 'priority') && <InboxView
             view={view} emails={filteredEmails} totalEstimate={totalEstimate} source={mailSource} mailFilter={mailFilter} setMailFilter={setMailFilter}
@@ -1127,7 +1129,7 @@ export default function App() {
             onMarkRead={updateEmailReadState} onArchive={archiveEmail} onTrash={trashEmail} onRefreshEmail={refreshSelected}
           />}
           {view === 'tasks' && <TasksView tasks={tasks} busy={busy} onAdd={() => setTaskModalOpen(true)} onUpdate={patchTask} onOpenEmail={(id) => { const item = emails.find((email) => email.id === id); if (item) selectEmail(item); else { setSelectedId(id); setView('inbox'); } }} />}
-          {view === 'briefing' && <BriefingView briefing={briefing} tasks={tasks} emails={emails} busy={busy === 'briefing'} onRefresh={async () => { setBusy('briefing'); try { setBriefing(await api<Briefing>('/briefing/daily?hours=24')); notify('Briefing refreshed.'); } catch (error) { notify(errorText(error), 'error'); } finally { setBusy(null); } }} onOpenEmail={selectEmail} onGoTasks={() => go('tasks')} />}
+          {view === 'briefing' && <BriefingView briefing={briefing} tasks={tasks} emails={emails} busy={busy === 'briefing'} onRefresh={async () => { setBusy('briefing'); try { setBriefing(await api<Briefing>('/briefing/daily?hours=24')); setBriefingError(null); notify('Briefing refreshed.'); } catch (error) { setBriefingError(errorText(error)); notify(errorText(error), 'error'); } finally { setBusy(null); } }} onOpenEmail={selectEmail} onGoTasks={() => go('tasks')} />}
           {view === 'assistant' && <AssistantView messages={chatMessages} input={chatInput} setInput={setChatInput} busy={chatBusy} model={model} onSubmit={sendChat} onOpenEmail={selectEmail} />}
           {view === 'drafts' && <DraftsView drafts={drafts} selectedId={selectedDraftId} editor={draftEditor} busy={busy} onSelect={(draft) => { setSelectedDraftId(draft.id); setDraftEditor({ ...draft }); }} onNew={() => openWritingStudio('new')} onEditorChange={setDraftEditor} onSave={saveDraft} onSend={sendDraft} />}
           {view === 'calendar' && <CalendarView events={calendarEvents} onCreate={() => setCalendarModalOpen(true)} onRefresh={async () => { setBusy('calendar'); try { const result = await api<{ items: CalendarEvent[] }>('/calendar/events?days=14&limit=30'); setCalendarEvents(result.items || []); notify('Calendar refreshed.'); } catch (error) { notify(errorText(error), 'error'); } finally { setBusy(null); } }} busy={busy === 'calendar'} />}
@@ -1329,7 +1331,7 @@ function OverviewView({ auth, insights, model, briefing, emails, mailSource, tas
         </div>
         <div className="quick-full-briefing-meta"><span className="quick-provider"><span className={cx('status-dot', briefing?.provider === 'ollama' ? 'green' : 'amber')} /> {briefing?.provider || 'Local assistant'}{briefing?.generated_at ? ` · ${formatDate(briefing.generated_at)}` : ''}</span><span className="quick-full-briefing-period">LAST {briefing?.period_hours || 24} HOURS</span></div>
         <div className="quick-full-briefing-copy">
-          {briefing?.summary ? <BriefingText text={briefing.summary} /> : <p className="quick-briefing-placeholder">{backendOnline ? 'Your full daily briefing is being prepared from the local inbox index. It will appear here when the analysis finishes.' : 'Start the local backend to prepare your daily briefing.'}</p>}
+          {briefing?.summary ? <BriefingText text={briefing.summary} /> : <p className="quick-briefing-placeholder">{briefingError ? `Briefing could not load: ${briefingError}` : backendOnline ? 'Your full daily briefing is being prepared from the local inbox index. It will appear here when the analysis finishes.' : 'Start the local backend to prepare your daily briefing.'}</p>}
         </div>
         {briefing?.counts && <div className="quick-briefing-counts"><span><strong>{briefing.counts.emails_indexed_in_period ?? '—'}</strong> messages</span><span><strong>{briefing.counts.unread_in_period ?? '—'}</strong> unread</span><span><strong>{briefing.counts.urgent_or_high ?? '—'}</strong> priority</span><span><strong>{briefing.counts.open_tasks ?? tasks.length}</strong> open tasks</span><span><strong>{briefing.counts.overdue_tasks ?? 0}</strong> overdue</span></div>}
         {(Boolean(briefing?.important_emails?.length) || Boolean(briefing?.tasks_due_today_or_overdue?.length)) && <div className="quick-briefing-detail-grid">
