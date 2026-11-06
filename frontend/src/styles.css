@@ -2106,6 +2106,8 @@ body {
 .quick-agenda-status i { width: 6px; height: 6px; border-radius: 50%; background: #c4a25e; }
 .quick-agenda-status.is-ready { color: #4a724e; background: #eff6e9; border-color: #e1ecd9; }
 .quick-agenda-status.is-ready i { background: #75a66e; }
+.quick-agenda-status.is-error { color: #9b4b3f; background: #fff2ee; border-color: #f2d8d1; }
+.quick-agenda-status.is-error i { background: #c96b5c; }
 .quick-agenda-briefing-copy { margin: 14px 0 10px; padding: 12px 14px; border: 1px solid #e8eee2; border-radius: 12px; background: rgba(246,249,241,.9); }
 .quick-agenda-briefing-copy .quick-provider { margin-bottom: 6px; color: #84917e; font-size: 8px; }
 .quick-agenda-briefing-copy .briefing-compact-text { display: -webkit-box; overflow: hidden; margin: 0; color: #526353; font-size: 11px; line-height: 1.65; -webkit-line-clamp: 4; -webkit-box-orient: vertical; }
