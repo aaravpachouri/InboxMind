@@ -1327,7 +1327,7 @@ function OverviewView({ auth, insights, model, briefing, briefingError, emails, 
       <article className="quick-feed-panel quick-full-briefing-panel">
         <div className="quick-panel-head quick-full-briefing-head">
           <div><span className="quick-panel-kicker">YOUR DAY, DISTILLED</span><h2>Daily briefing</h2><p>The complete picture from your recent messages and open commitments.</p></div>
-          <span className={cx('quick-agenda-status', briefing?.summary ? 'is-ready' : 'is-pending')}><i />{briefing?.summary ? 'Ready' : 'Preparing'}</span>
+          <span className={cx('quick-agenda-status', briefing?.summary ? 'is-ready' : briefingError ? 'is-error' : 'is-pending')}><i />{briefing?.summary ? 'Ready' : briefingError ? 'Needs attention' : 'Preparing'}</span>
         </div>
         <div className="quick-full-briefing-meta"><span className="quick-provider"><span className={cx('status-dot', briefing?.provider === 'ollama' ? 'green' : 'amber')} /> {briefing?.provider || 'Local assistant'}{briefing?.generated_at ? ` · ${formatDate(briefing.generated_at)}` : ''}</span><span className="quick-full-briefing-period">LAST {briefing?.period_hours || 24} HOURS</span></div>
         <div className="quick-full-briefing-copy">
