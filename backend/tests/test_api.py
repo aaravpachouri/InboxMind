@@ -250,3 +250,42 @@ def test_manual_sync_resumes_pagination_between_clicks(tmp_path):
 
     assert first.status_code == second.status_code == third.status_code == 200
     assert gmail.calls == [None, "page-2", "page-3"]
+
+
+
+def test_daily_briefing_uses_timezone_safe_window_and_grounded_fallback(tmp_path):
+    client, _ = make_client(tmp_path)
+    services = client.app.state.services
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    services.analysis.save_email({
+        "id": "recent-offset", "thread_id": "recent-offset-thread",
+        "from_address": "sender@example.com", "to_addresses": "test@example.com",
+        "cc_addresses": "", "subject": "Action required: review plan",
+        "snippet": "Please review the plan today.", "body_text": "Please review the plan today.",
+        "internal_date": (now.astimezone(timezone(timedelta(hours=5, minutes=30)))).isoformat(),
+        "labels": ["INBOX", "UNREAD"], "is_unread": True, "is_sent": False,
+        "priority": "urgent", "category": "work", "ai_summary": "Review the plan today.",
+        "has_attachments": False, "attachment_metadata": [], "raw_headers": {},
+    })
+    services.analysis.save_email({
+        "id": "old-message", "thread_id": "old-thread",
+        "from_address": "sender@example.com", "to_addresses": "test@example.com",
+        "cc_addresses": "", "subject": "Old message",
+        "snippet": "This is outside the requested window.", "body_text": "Old message.",
+        "internal_date": (now - timedelta(days=3)).isoformat(),
+        "labels": ["INBOX"], "is_unread": False, "is_sent": False,
+        "priority": "low", "category": "other",
+        "has_attachments": False, "attachment_metadata": [], "raw_headers": {},
+    })
+
+    response = client.get("/api/v1/briefing/daily?hours=24")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["counts"]["emails_indexed_in_period"] == 1
+    assert payload["counts"]["unread_in_period"] == 1
+    assert payload["counts"]["urgent_or_high"] == 1
+    assert payload["important_emails"][0]["id"] == "recent-offset"
+    assert "review plan" in payload["summary"].lower()
+    assert payload["provider"] == "local-summary"
