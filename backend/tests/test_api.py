@@ -293,3 +293,35 @@ def test_daily_briefing_uses_timezone_safe_window_and_grounded_fallback(tmp_path
     assert payload["important_emails"][0]["id"] == "recent-offset"
     assert "review plan" in payload["summary"].lower()
     assert payload["provider"] == "local-summary"
+
+
+
+def test_daily_briefing_counts_all_priority_emails_beyond_display_limit(tmp_path):
+    client, _ = make_client(tmp_path)
+    services = client.app.state.services
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    for index in range(14):
+        message_id = f"priority-{index}"
+        services.analysis.save_email({
+            "id": message_id, "thread_id": f"thread-{index}",
+            "from_address": f"sender{index}@example.com", "to_addresses": "test@example.com",
+            "cc_addresses": "", "subject": f"Priority message {index}",
+            "snippet": "Please review this item.", "body_text": "Please review this item.",
+            "internal_date": (now - timedelta(minutes=index)).isoformat(),
+            "labels": ["INBOX"], "is_unread": False, "is_sent": False,
+            "has_attachments": False, "attachment_metadata": [], "raw_headers": {},
+        })
+        priority = "urgent" if index == 13 else "high"
+        services.db.execute(
+            "UPDATE emails SET priority=?, category='work' WHERE id=?",
+            (priority, message_id),
+        )
+
+    response = client.get("/api/v1/briefing/daily?hours=24")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["counts"]["urgent_or_high"] == 14
+    assert len(payload["important_emails"]) == 12
+    assert payload["important_emails"][0]["priority"] == "urgent"
