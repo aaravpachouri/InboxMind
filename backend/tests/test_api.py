@@ -269,6 +269,10 @@ def test_daily_briefing_uses_timezone_safe_window_and_grounded_fallback(tmp_path
         "priority": "urgent", "category": "work", "ai_summary": "Review the plan today.",
         "has_attachments": False, "attachment_metadata": [], "raw_headers": {},
     })
+    services.db.execute(
+        "UPDATE emails SET priority='urgent', category='work', ai_summary=? WHERE id=?",
+        ("Review the plan today.", "recent-offset"),
+    )
     services.analysis.save_email({
         "id": "old-message", "thread_id": "old-thread",
         "from_address": "sender@example.com", "to_addresses": "test@example.com",
