@@ -4,6 +4,7 @@ import getpass
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -112,6 +113,39 @@ def install_autostart() -> None:
     print("InboxMind worker is registered to start at Windows sign-in.")
 
 
+def heartbeat_loop(base: str, headers: dict[str, str], model: str,
+                   stop_event: threading.Event, model_ready: threading.Event) -> None:
+    """Keep the server heartbeat fresh even while Ollama is generating a long response."""
+    timeout = httpx.Timeout(12.0, connect=5.0)
+    with httpx.Client(timeout=timeout) as heartbeat_client:
+        while not stop_event.is_set():
+            ready = False
+            names: list[str] = []
+            try:
+                ready, names = ollama_status(heartbeat_client, model)
+                if ready:
+                    post(heartbeat_client, base, headers, "/ai/worker/heartbeat", {
+                        "device_name": os.environ.get("COMPUTERNAME", "Windows PC")[:120],
+                        "worker_version": "1.1.0", "model_name": model,
+                        "installed_models": names, "model_available": True,
+                    })
+                    print("InboxMind heartbeat confirmed; local model available.")
+                else:
+                    post(heartbeat_client, base, headers, "/ai/worker/heartbeat", {
+                        "device_name": os.environ.get("COMPUTERNAME", "Windows PC")[:120],
+                        "worker_version": "1.1.0", "model_name": model,
+                        "installed_models": names, "model_available": False,
+                    })
+                    print("Ollama model: offline or selected model not installed")
+            except (httpx.HTTPError, ValueError, RuntimeError) as exc:
+                print("InboxMind heartbeat failed:", str(exc)[:220])
+            if ready:
+                model_ready.set()
+            else:
+                model_ready.clear()
+            stop_event.wait(HEARTBEAT_SECONDS)
+
+
 def main() -> None:
     base = api_base()
     model = os.environ.get("INBOXMIND_OLLAMA_MODEL", DEFAULT_MODEL).strip()
@@ -120,28 +154,22 @@ def main() -> None:
     if "--install-autostart" in sys.argv:
         install_autostart()
     print("InboxMind private AI worker running. Ollama remains local; this worker connects outward only.")
-    last_heartbeat = 0.0
-    ready = False
-    model_names: list[str] = []
+
+    # Run heartbeat independently: local inference can take longer than the server's
+    # 75-second online window, so the main job loop must never block status updates.
+    stop_event = threading.Event()
+    model_ready = threading.Event()
+    heartbeat_thread = threading.Thread(
+        target=heartbeat_loop,
+        args=(base, headers, model, stop_event, model_ready),
+        name="inboxmind-heartbeat",
+        daemon=True,
+    )
+    heartbeat_thread.start()
+
     with httpx.Client(timeout=httpx.Timeout(15.0, connect=5.0)) as client:
         while True:
-            now = time.monotonic()
-            if now - last_heartbeat >= HEARTBEAT_SECONDS:
-                try:
-                    ready, model_names = ollama_status(client, model)
-                except (httpx.HTTPError, ValueError):
-                    ready, model_names = False, []
-                try:
-                    post(client, base, headers, "/ai/worker/heartbeat", {
-                        "device_name": os.environ.get("COMPUTERNAME", "Windows PC")[:120],
-                        "worker_version": "1.0.0", "model_name": model,
-                        "installed_models": model_names, "model_available": ready,
-                    })
-                except (httpx.HTTPError, ValueError, RuntimeError) as exc:
-                    print("InboxMind heartbeat failed:", str(exc)[:220])
-                print("Ollama model:", "ready" if ready else "offline or selected model not installed")
-                last_heartbeat = now
-            if not ready:
+            if not model_ready.is_set():
                 time.sleep(POLL_SECONDS)
                 continue
             try:

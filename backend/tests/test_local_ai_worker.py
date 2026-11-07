@@ -132,3 +132,14 @@ def test_worker_requirements_include_http_and_windows_credential_storage() -> No
     requirements = (ROOT / "worker" / "requirements.txt").read_text(encoding="utf-8")
     assert "httpx" in requirements
     assert "keyring" in requirements
+
+
+def test_windows_worker_sends_heartbeat_on_a_separate_thread_during_inference() -> None:
+    source = (ROOT / "worker" / "run_worker.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    names = {node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    assert "heartbeat_loop" in names
+    assert "threading.Thread" in source
+    assert 'name="inboxmind-heartbeat"' in source
+    assert "stop_event.wait(HEARTBEAT_SECONDS)" in source
+    assert "InboxMind heartbeat confirmed" in source
