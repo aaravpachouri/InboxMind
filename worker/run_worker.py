@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 import httpx
 import keyring
 
-DEFAULT_API_BASE = "https://inboxmind-aaravpachouri.vercel.app/api/v1"
+DEFAULT_API_BASE = "https://inboxmind-rose.vercel.app/api/v1"
 OLLAMA_BASE = "http://127.0.0.1:11434"
 DEFAULT_MODEL = "llama3.2:3b"
 CREDENTIAL_SERVICE = "InboxMindLocalAIWorker"
@@ -23,7 +23,7 @@ POLL_SECONDS = 2
 def api_base() -> str:
     value = os.environ.get("INBOXMIND_API_BASE", DEFAULT_API_BASE).strip().rstrip("/")
     parsed = urlparse(value)
-    allowed_hosts = {"inboxmind-aaravpachouri.vercel.app", "inboxmind-api-skqr.onrender.com"}
+    allowed_hosts = {"inboxmind-rose.vercel.app", "inboxmind-api-skqr.onrender.com"}
     if (parsed.scheme != "https" or parsed.hostname not in allowed_hosts or
             parsed.username or parsed.password or parsed.query or parsed.fragment or
             parsed.path.rstrip("/") != "/api/v1"):
