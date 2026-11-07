@@ -1,0 +1,19 @@
+{
+  "rewrites": [
+    {
+      "source": "/api/v1/:path*",
+      "destination": "https://inboxmind-api-skqr.onrender.com/api/v1/:path*"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/api/v1/:path*",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-store"
+        }
+      ]
+    }
+  ]
+}

@@ -475,6 +475,11 @@ input, textarea, select { color: var(--ink); }
 .model-setting select { max-width: 380px; }
 .model-status { display: flex; align-items: center; gap: 7px; margin-top: 10px; color: #879486; font-size: 9px; }
 .setting-footnote { margin: 9px 0 0; color: #9ba49a; font-size: 9px; line-height: 1.6; }
+.worker-token-box { display: grid; gap: 8px; margin-top: 12px; padding: 12px; border: 1px solid #e6ecdf; border-radius: 10px; background: #f8faf5; }
+.worker-token-box label { color: #607260; font-size: 9px; font-weight: 800; }
+.worker-token-box input { width: 100%; min-width: 0; padding: 9px 10px; border: 1px solid #dce5d8; border-radius: 8px; background: #fff; color: #415742; font: 10px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+.worker-token-box .button-secondary { justify-self: start; }
+
 .storage-row { display: grid; gap: 12px; }
 .storage-row > div { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 10px 0; border-bottom: 1px solid #edf0eb; }
 .storage-row > div:last-child { border-bottom: 0; }
@@ -2197,4 +2202,43 @@ body {
   .quick-full-briefing-panel { padding: 14px 12px 12px; }
   .quick-full-briefing-copy { padding: 11px 12px; }
   .quick-full-briefing-meta { align-items: flex-start; flex-direction: column; gap: 5px; }
+}
+
+
+/* Daily briefing: scannable hierarchy, explicit metrics and clearer action groups. */
+.quick-full-briefing-panel { padding: 21px; background: radial-gradient(ellipse at 100% 0%, rgba(202,231,179,.2), transparent 42%), linear-gradient(155deg,#fffefa 0%,#f9fbf5 100%); }
+.quick-full-briefing-head h2 { font-size: 27px; }
+.quick-full-briefing-head p { font-size: 10px; }
+.quick-full-briefing-meta { margin: 15px 0 12px; }
+.quick-briefing-metric-grid { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 8px; margin-bottom: 12px; }
+.quick-briefing-metric { display: flex; flex-direction: column; gap: 5px; min-width: 0; padding: 10px 11px; border: 1px solid #e6ebdf; border-radius: 11px; background: rgba(255,255,252,.88); }
+.quick-briefing-metric span { color: #899488; font-size: 9px; font-weight: 650; }
+.quick-briefing-metric strong { color: #294a32; font-size: 21px; font-weight: 780; line-height: 1; font-variant-numeric: tabular-nums; }
+.quick-briefing-metric.is-priority { border-color: #f0e2cf; background: #fffaf2; }
+.quick-briefing-metric.is-priority strong { color: #a56a2e; }
+.quick-briefing-metric.is-overdue { border-color: #f0d9d5; background: #fff8f6; }
+.quick-briefing-metric.is-overdue strong { color: #b14e43; }
+.quick-full-briefing-copy { padding: 14px 16px; border: 1px solid #e5ebdf; border-radius: 13px; background: rgba(245,249,240,.92); }
+.quick-briefing-section-label { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; color: #71886a; font-size: 8px; font-weight: 850; letter-spacing: 1px; }
+.quick-briefing-section-label svg { color: #7b9b69; }
+.quick-full-briefing-copy .briefing-prose { color: #4d5f4f; font-size: 12px; line-height: 1.8; }
+.quick-full-briefing-copy .briefing-prose p { margin: 0 0 9px; }
+.quick-full-briefing-copy .briefing-prose p:last-child { margin-bottom: 0; }
+.quick-briefing-detail-group h3 { justify-content: flex-start; }
+.quick-briefing-detail-group h3 span { display: inline-grid; place-items: center; min-width: 17px; height: 17px; margin-left: auto; padding: 0 5px; border-radius: 6px; color: #637a5d; background: #edf3e8; font-size: 8px; }
+.quick-briefing-detail-group { padding: 13px; }
+.quick-brief-email, .quick-brief-task { padding: 9px 0; }
+.quick-brief-email strong, .quick-brief-task strong { font-size: 10px; }
+.quick-brief-email small, .quick-brief-task small { font-size: 9px; }
+.quick-briefing-next-steps { border: 1px solid #e5ecdc; background: #f3f7ed; }
+.quick-briefing-next-steps h3 { font-size: 9px; }
+.quick-briefing-next-steps li { font-size: 9px; }
+@media (max-width: 980px) {
+  .quick-briefing-metric-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }
+}
+@media (max-width: 560px) {
+  .quick-full-briefing-panel { padding: 15px 13px 13px; }
+  .quick-briefing-metric-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .quick-briefing-metric:last-child { grid-column: span 2; }
+  .quick-full-briefing-copy { padding: 12px; }
 }

@@ -1,0 +1,47 @@
+services:
+  - type: web
+    name: inboxmind-api
+    runtime: python
+    plan: free
+    region: singapore
+    repo: https://github.com/aaravpachouri/InboxMind
+    branch: feat/secure-multi-tenant-deployment
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m gmail_agent.migrate && uvicorn gmail_agent.public_app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_HOST
+        value: 0.0.0.0
+      - key: DATABASE_URL
+        fromDatabase:
+          name: inboxmind-postgres
+          property: connectionString
+      - key: APP_ENCRYPTION_KEY
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REDIRECT_URI
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: https://inboxmind-aaravpachouri.vercel.app
+      - key: AUTO_SYNC_ENABLED
+        value: "false"
+      - key: AI_ENABLED
+        value: "false"
+      - key: APPS_SCRIPT_BRIDGE_URL
+        value: ""
+      - key: APPS_SCRIPT_BRIDGE_SECRET
+        value: ""
+databases:
+  - name: inboxmind-postgres
+    databaseName: inboxmind
+    plan: free
+    region: singapore
+    postgresMajorVersion: "18"
+    ipAllowList: []

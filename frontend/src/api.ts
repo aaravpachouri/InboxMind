@@ -1,4 +1,12 @@
-export const API_BASE = (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api/v1').replace(/\/$/, '');
+// Keep API calls same-origin so the browser accepts the secure session and CSRF cookies
+// through the Vercel rewrite in frontend/vercel.json. Direct Render fetches are cross-site.
+export const API_BASE = '/api/v1';
+
+function cookieValue(name: string): string | undefined {
+  const prefix = `${name}=`;
+  const entry = document.cookie.split('; ').find((item) => item.startsWith(prefix));
+  return entry ? decodeURIComponent(entry.slice(prefix.length)) : undefined;
+}
 
 export type EmailSummary = {
   id: string;
@@ -20,6 +28,8 @@ export type EmailSummary = {
 export type EmailDetail = EmailSummary & {
   cc_addresses?: string;
   body_text?: string;
+  body_format?: 'plain' | 'html';
+  body_truncated?: boolean;
   attachment_metadata?: Array<{ attachment_id: string; filename: string; mime_type?: string; size?: number }>;
   ai_analysis?: Record<string, unknown>;
   raw_headers?: Record<string, string>;
@@ -79,17 +89,22 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   const headers = new Headers(options.headers || {});
   if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   headers.set('Accept', 'application/json');
+  const method = (options.method || 'GET').toUpperCase();
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const csrf = cookieValue('inboxmind_csrf');
+    if (csrf) headers.set('X-CSRF-Token', csrf);
+  }
   let response: Response;
   try {
     response = await fetch(`${API_BASE}${path.startsWith('/') ? path : `/${path}`}`, {
       ...options,
       headers,
-      credentials: 'omit',
+      credentials: 'include',
       cache: 'no-store',
     });
   } catch (error) {
     throw new ApiError(
-      `Cannot reach the local backend at ${API_BASE}. Make sure the backend is running on port 8000.`,
+      `Cannot reach InboxMind API at ${API_BASE}. Check your internet connection and API deployment.`,
       0,
       error,
     );
