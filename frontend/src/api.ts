@@ -90,38 +90,78 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
   headers.set('Accept', 'application/json');
   const method = (options.method || 'GET').toUpperCase();
+  const canRetry = ['GET', 'HEAD'].includes(method);
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
     const csrf = cookieValue('inboxmind_csrf');
     if (csrf) headers.set('X-CSRF-Token', csrf);
   }
-  let response: Response;
-  try {
-    response = await fetch(`${API_BASE}${path.startsWith('/') ? path : `/${path}`}`, {
-      ...options,
-      headers,
-      credentials: 'include',
-      cache: 'no-store',
-    });
-  } catch (error) {
-    throw new ApiError(
-      `Cannot reach InboxMind API at ${API_BASE}. Check your internet connection and API deployment.`,
-      0,
-      error,
-    );
+
+  const url = `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+  let response: Response | undefined;
+  let responseText = '';
+
+  // Render Free may need time to wake. Retry only safe, read-only requests and
+  // never replay mutations such as sending mail, saving drafts, or changing settings.
+  for (let attempt = 0; attempt < (canRetry ? 3 : 1); attempt += 1) {
+    try {
+      response = await fetch(url, {
+        ...options,
+        headers,
+        credentials: 'include',
+        cache: 'no-store',
+      });
+    } catch (error) {
+      if (canRetry && attempt < 2) {
+        await new Promise((resolve) => setTimeout(resolve, 800 * (attempt + 1)));
+        continue;
+      }
+      throw new ApiError(
+        `Cannot reach InboxMind API at ${API_BASE}. The backend may be waking up; please retry shortly.`,
+        0,
+        error,
+      );
+    }
+
+    if (!(canRetry && [429, 502, 503, 504].includes(response.status) && attempt < 2)) break;
+    const retryAfter = Number(response.headers.get('Retry-After'));
+    const delay = Number.isFinite(retryAfter) && retryAfter > 0
+      ? Math.min(retryAfter * 1000, 4000)
+      : 800 * (attempt + 1);
+    await new Promise((resolve) => setTimeout(resolve, delay));
   }
-  const text = await response.text();
+
+  if (!response) throw new ApiError('InboxMind API did not return a response. Please retry shortly.', 0);
+  responseText = await response.text();
   let body: unknown = null;
-  if (text) {
-    try { body = JSON.parse(text); } catch { body = text; }
+  if (responseText) {
+    try { body = JSON.parse(responseText); } catch { body = responseText; }
   }
+
   if (!response.ok) {
     const asRecord = body && typeof body === 'object' ? body as Record<string, unknown> : null;
     const detail = asRecord?.detail;
-    const message = typeof detail === 'string'
-      ? detail
-      : `Request failed (${response.status}). ${typeof body === 'string' ? body : ''}`.trim();
-    throw new ApiError(message, response.status, detail ?? body);
+    const isHtml = typeof body === 'string' && (
+      /<!doctype html|<html[\s>]/i.test(body) ||
+      /cf_chl_|challenge-platform|just a moment/i.test(body)
+    );
+
+    let message: string;
+    if (isHtml && response.status === 429) {
+      message = 'The API edge temporarily rate-limited this request (429). Wait a moment and retry; the HTML security challenge was not an InboxMind API response.';
+    } else if (isHtml) {
+      message = `The API gateway returned an HTML error page (HTTP ${response.status}), not an InboxMind API response. Please retry shortly.`;
+    } else if (typeof detail === 'string') {
+      message = detail;
+    } else if (response.status === 429) {
+      message = 'InboxMind is being temporarily rate-limited (429). Please wait a moment and retry.';
+    } else if ([502, 503, 504].includes(response.status)) {
+      message = 'InboxMind backend is waking up or temporarily unavailable. Please retry shortly.';
+    } else {
+      message = `Request failed (${response.status}).`;
+    }
+    throw new ApiError(message, response.status, isHtml ? undefined : (detail ?? body));
   }
+
   return body as T;
 }
 
