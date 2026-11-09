@@ -1562,7 +1562,7 @@ async def daily_briefing(
                     "description": str(candidate.get("description") or "")[:2000],
                     "due_date": candidate.get("due_date") if isinstance(candidate.get("due_date"), str) else None,
                     "priority": candidate.get("priority") if candidate.get("priority") in {"low", "medium", "high", "urgent"} else "medium",
-                    "confidence": max(0.0, min(1.0, float(candidate.get("confidence", 0.0) or 0.0))),
+                    "confidence": max(0.0, min(1.0, float(candidate.get("confidence")))) if isinstance(candidate.get("confidence"), (int, float)) else 0.0,
                     "evidence_quote": str(candidate.get("evidence_quote") or "")[:500],
                     "source_email_id": str(item["id"]),
                     "source_subject": str(item.get("subject") or "(no subject)")[:300],
@@ -1571,7 +1571,7 @@ async def daily_briefing(
                 for candidate in (analysis.get("tasks") if isinstance(analysis.get("tasks"), list) else [])
                 if isinstance(candidate, dict) and str(candidate.get("title") or "").strip()
                 and str(candidate.get("evidence_quote") or "").strip()
-                and float(candidate.get("confidence", 0.0) or 0.0) >= 0.7
+                and isinstance(candidate.get("confidence"), (int, float)) and candidate.get("confidence", 0.0) >= 0.7
             ][:5],
         })
 
