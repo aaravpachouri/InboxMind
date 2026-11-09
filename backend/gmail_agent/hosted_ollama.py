@@ -74,29 +74,59 @@ def _normalize_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
     return normalized
 
 
+async def _list_gemini_models(client: httpx.AsyncClient) -> list[dict[str, Any]]:
+    """Return models that this API key can actually use for generateContent."""
+    response = await client.get(f"{GEMINI_API_BASE}/models")
+    response.raise_for_status()
+    data = response.json()
+    models = data.get("models", []) if isinstance(data, dict) else []
+    return [
+        item for item in models
+        if isinstance(item, dict)
+        and "generateContent" in (item.get("supportedGenerationMethods") or [])
+        and isinstance(item.get("name"), str)
+    ]
+
+
+def _select_gemini_model(models: list[dict[str, Any]]) -> str | None:
+    names = [str(item["name"]).removeprefix("models/") for item in models]
+    configured_name = GEMINI_MODEL.removeprefix("models/")
+    if configured_name in names:
+        return configured_name
+    # Prefer a low-cost Flash-Lite model, then Flash. Never select embedding-only models.
+    for marker in ("flash-lite", "flash"):
+        for name in names:
+            if marker in name.lower() and "preview" not in name.lower():
+                return name
+    return names[0] if names else None
+
+
 async def _gemini_model_status() -> dict[str, Any]:
-    if not GEMINI_API_KEY or not GEMINI_MODEL:
+    if not GEMINI_API_KEY:
         return {
             "available": False, "provider": "gemini", "model": GEMINI_MODEL or None,
-            "detail": "Gemini is not configured. Set GEMINI_API_KEY and GEMINI_MODEL on the backend.",
+            "detail": "Gemini is not configured. Set GEMINI_API_KEY on the backend.",
         }
     try:
-        timeout = httpx.Timeout(8.0, connect=4.0)
+        timeout = httpx.Timeout(12.0, connect=4.0)
         async with httpx.AsyncClient(timeout=timeout, headers={"x-goog-api-key": GEMINI_API_KEY}) as client:
-            response = await client.get(f"{GEMINI_API_BASE}/models/{GEMINI_MODEL}")
-            response.raise_for_status()
-            data = response.json()
+            models = await _list_gemini_models(client)
+        selected = _select_gemini_model(models)
+        if not selected:
+            return {
+                "available": False, "provider": "gemini", "model": GEMINI_MODEL or None,
+                "detail": "The Gemini API key is valid, but Google returned no models supporting generateContent.",
+            }
         return {
-            "available": True, "provider": "gemini", "model": GEMINI_MODEL,
-            "detail": str(data.get("displayName") or "Gemini model is reachable."),
+            "available": True, "provider": "gemini", "model": selected,
+            "detail": f"Gemini is reachable. Using {selected}.",
         }
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
-        detail = "Gemini authentication failed. Check GEMINI_API_KEY." if status in {401, 403} else f"Gemini model check returned HTTP {status}."
-        return {"available": False, "provider": "gemini", "model": GEMINI_MODEL, "detail": detail}
+        detail = "Gemini authentication failed. Check GEMINI_API_KEY." if status in {401, 403} else f"Gemini model discovery returned HTTP {status}."
+        return {"available": False, "provider": "gemini", "model": GEMINI_MODEL or None, "detail": detail}
     except (httpx.HTTPError, ValueError):
-        return {"available": False, "provider": "gemini", "model": GEMINI_MODEL, "detail": "Gemini could not be reached. Check backend connectivity."}
-
+        return {"available": False, "provider": "gemini", "model": GEMINI_MODEL or None, "detail": "Gemini could not be reached. Check backend connectivity."}
 
 async def _ollama_model_status() -> dict[str, Any]:
     if not OLLAMA_BASE_URL or not OLLAMA_MODEL:
@@ -137,8 +167,8 @@ async def _generate_gemini(
     json_output: bool,
     timeout_seconds: int | None,
 ) -> dict[str, str]:
-    if not GEMINI_API_KEY or not GEMINI_MODEL:
-        raise HTTPException(503, "Gemini is not configured. Set GEMINI_API_KEY and GEMINI_MODEL on the backend.")
+    if not GEMINI_API_KEY:
+        raise HTTPException(503, "Gemini is not configured. Set GEMINI_API_KEY on the backend.")
     system_parts = [item["content"] for item in messages if item["role"] == "system"]
     contents = [
         {"role": "model" if item["role"] == "assistant" else "user",
@@ -162,8 +192,12 @@ async def _generate_gemini(
             async with httpx.AsyncClient(timeout=timeout, headers={
                 "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY,
             }) as client:
+                models = await _list_gemini_models(client)
+                selected_model = _select_gemini_model(models)
+                if not selected_model:
+                    raise HTTPException(503, "Gemini API key is valid, but no model supporting generateContent is available.")
                 response = await client.post(
-                    f"{GEMINI_API_BASE}/models/{GEMINI_MODEL}:generateContent", json=payload,
+                    f"{GEMINI_API_BASE}/models/{selected_model}:generateContent", json=payload,
                 )
                 response.raise_for_status()
                 data = response.json()
@@ -172,7 +206,7 @@ async def _generate_gemini(
         content = "".join(str(part.get("text", "")) for part in parts if isinstance(part, dict))
         if not content.strip():
             raise HTTPException(502, "Gemini returned an empty response. No AI result was saved.")
-        return {"content": content.strip(), "provider": "gemini", "model": GEMINI_MODEL}
+        return {"content": content.strip(), "provider": "gemini", "model": selected_model}
     except httpx.TimeoutException:
         raise HTTPException(504, "Gemini timed out. No AI result was fabricated; please retry.") from None
     except httpx.HTTPStatusError as exc:
