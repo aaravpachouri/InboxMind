@@ -23,6 +23,7 @@ from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2 import id_token
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
+from gmail_agent import hosted_ollama
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
@@ -955,6 +956,16 @@ def _require_online_ai_worker(user_id: str) -> dict[str, Any]:
 async def _run_local_ai_job(user_id: str, job_type: str, messages: list[dict[str, str]],
                             temperature: float = 0.2, timeout_seconds: int = 90) -> dict[str, Any]:
     _require_ai_enabled(user_id)
+    if hosted_ollama.AI_BACKEND_MODE == "hosted":
+        return await hosted_ollama.generate(
+            messages,
+            temperature=temperature,
+            json_output=(job_type == "analyze_email"),
+        )
+    if hosted_ollama.AI_BACKEND_MODE != "private_worker":
+        raise HTTPException(503, "AI backend mode is invalid. AI is unavailable; no result was fabricated.")
+
+    # Explicit migration fallback for existing per-user Windows Ollama workers.
     _require_online_ai_worker(user_id)
     pool = _pool_or_503()
     payload = {"messages": messages, "temperature": temperature, "format": "json" if job_type == "analyze_email" else ""}
@@ -1000,7 +1011,7 @@ async def _run_local_ai_job(user_id: str, job_type: str, messages: list[dict[str
                WHERE user_id=%s AND id=%s AND status IN ('queued','leased')""",
             (user_id, job_id),
         )
-    raise HTTPException(504, "Local AI worker did not finish within 90 seconds. The email was not changed.")
+    raise HTTPException(504, f"Local AI worker did not finish within {timeout_seconds} seconds. The email was not changed.")
 
 
 @app.post("/api/v1/ai/workers/register")
@@ -1147,19 +1158,33 @@ def complete_ai_worker_job(
 
 
 @app.get("/api/v1/system/model")
-def hosted_model_status(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+async def hosted_model_status(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
-    ai_enabled = _user_ai_enabled(str(user["id"]))
-    worker = _worker_for_user(str(user["id"]))
+    user_id = str(user["id"])
+    ai_enabled = _user_ai_enabled(user_id)
+
+    if hosted_ollama.AI_BACKEND_MODE == "hosted":
+        status = await hosted_ollama.model_status()
+        if not ai_enabled:
+            status["detail"] = "AI analysis is disabled in Settings. Enable it to use hosted Ollama."
+        return {
+            **status,
+            "ai_enabled": ai_enabled,
+            "engine_mode": "hosted",
+            "worker_online": bool(status.get("available")),
+            "worker_registered": False,
+        }
+
+    worker = _worker_for_user(user_id)
     if not worker:
         detail = (
             "AI analysis is disabled in Settings. Enable it to use your private Windows worker."
             if not ai_enabled else
             "Register your Windows PC as the private AI worker in Settings."
         )
-        return {"available": False, "ai_enabled": ai_enabled, "provider": "local-worker", "model": None,
+        return {"available": False, "ai_enabled": ai_enabled, "provider": "ollama", "model": None,
                 "installed_models": [], "worker_online": False, "worker_registered": False,
-                "detail": detail}
+                "engine_mode": "private_worker", "detail": detail}
     seen = worker.get("last_seen_at")
     fresh = bool(seen and (datetime.now(timezone.utc) - seen).total_seconds() <= 75)
     available = bool(fresh and worker.get("model_available"))
@@ -1176,10 +1201,11 @@ def hosted_model_status(session: str | None = Cookie(default=None, alias=SESSION
         detail = "Worker is online, but the configured Ollama model is unavailable on this PC."
     return {
         "available": available, "ai_enabled": ai_enabled,
-        "provider": "ollama" if available else "local-worker",
+        "provider": "ollama" if available else "private_worker",
         "model": worker.get("model_name") or None, "installed_models": models,
         "detail": detail,
-        "worker_online": fresh, "worker_registered": True, "device_name": worker.get("device_name"),
+        "worker_online": fresh, "worker_registered": True,
+        "engine_mode": "private_worker", "device_name": worker.get("device_name"),
     }
 
 
