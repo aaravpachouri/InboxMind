@@ -26,8 +26,8 @@ Install Docker and the NVIDIA Container Toolkit on a GPU-capable host, then:
 ```sh
 cd infrastructure/ollama
 docker compose up -d --build
-docker exec -it ollama-ollama-1 ollama pull llama3.2:3b
-docker exec -it ollama-ollama-1 ollama list
+docker compose exec ollama ollama pull llama3.2:3b
+docker compose exec ollama ollama list
 ```
 
 The compose file binds Ollama to loopback. For a remote backend, place Ollama
