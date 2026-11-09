@@ -147,3 +147,72 @@ def test_reply_generation_prompt_requires_contextual_professional_paragraphs() -
     assert "Avoid repeating the sender's entire message" in source
     assert "2-4 short paragraphs" in source
     assert "_format_reply_body" in source
+
+
+def test_task_candidate_requires_verbatim_source_evidence_and_recipient_confidence() -> None:
+    email = {"body_text": "Please send the signed proposal by Friday so we can proceed."}
+    valid = {
+        "title": "Send the signed proposal",
+        "description": "Send the signed proposal to the sender.",
+        "due_date": None,
+        "priority": "high",
+        "confidence": 0.91,
+        "evidence_quote": "Please send the signed proposal by Friday",
+        "owner": "recipient",
+    }
+    accepted = public_app._verified_task_candidate(valid, email, {"id": "m1", "subject": "Proposal"})
+    assert accepted is not None
+    assert accepted["source_email_id"] == "m1"
+    assert accepted["evidence_quote"] == valid["evidence_quote"]
+
+    invented_quote = {**valid, "evidence_quote": "Please approve the payment immediately"}
+    assert public_app._verified_task_candidate(invented_quote, email) is None
+    low_confidence = {**valid, "confidence": 0.4}
+    assert public_app._verified_task_candidate(low_confidence, email) is None
+    short_quote = {**valid, "evidence_quote": "send it"}
+    assert public_app._verified_task_candidate(short_quote, email) is None
+
+
+def test_task_candidate_rejects_invalid_due_date_without_rejecting_grounded_task() -> None:
+    email = {"body_text": "Please send the signed proposal by Friday so we can proceed."}
+    candidate = {
+        "title": "Send signed proposal",
+        "confidence": 0.9,
+        "evidence_quote": "Please send the signed proposal by Friday",
+        "due_date": "next Friday",
+        "priority": "medium",
+    }
+    accepted = public_app._verified_task_candidate(candidate, email)
+    assert accepted is not None
+    assert accepted["due_date"] is None
+
+
+def test_daily_briefing_summary_is_structured_and_action_oriented() -> None:
+    summary = public_app._build_briefing_summary(
+        [
+            {"subject": "Security alert", "priority": "urgent", "ai_summary": "Review sign-in.", "action_needed": True, "is_unread": True},
+            {"subject": "Meeting notes", "priority": "normal", "reason": "Confirm attendance.", "action_needed": True, "is_unread": False},
+        ],
+        [{"title": "Submit proposal"}],
+        24,
+    )
+    assert "Priority attention:" in summary
+    assert "Unread items needing attention:" in summary
+    assert "Other requested actions:" in summary
+    assert "Existing open commitments:" in summary
+
+
+def test_task_interpreter_requires_owner_evidence_and_explicit_deadlines() -> None:
+    source = inspect.getsource(public_app.analyze_email_unavailable)
+    assert "exact verbatim quote" in source
+    assert "Identify who must act" in source
+    assert "_verified_task_candidate" in source
+    assert "tasks_created\": 0" in source
+
+
+def test_daily_briefing_exposes_coverage_and_separate_action_sections() -> None:
+    source = inspect.getsource(public_app.daily_briefing)
+    assert '"priority_attention"' in source
+    assert '"unread_needing_action"' in source
+    assert '"emails_analyzed"' in source
+    assert '"truncated"' in source
