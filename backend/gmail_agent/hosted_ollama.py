@@ -25,7 +25,7 @@ def configured() -> bool:
 def validate_configuration() -> None:
     if AI_BACKEND_MODE not in {"hosted", "private_worker"}:
         raise RuntimeError("AI_BACKEND_MODE must be 'hosted' or 'private_worker'.")
-    if not configured() and AI_BACKEND_MODE == "hosted":
+    if not configured():
         return
     parsed = urlparse(OLLAMA_BASE_URL)
     if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
@@ -78,6 +78,7 @@ async def generate(
     *,
     temperature: float = 0.2,
     json_output: bool = False,
+    timeout_seconds: int | None = None,
 ) -> dict[str, str]:
     if not configured():
         raise HTTPException(503, "Hosted Ollama is not configured. AI is unavailable; no result was fabricated.")
@@ -104,7 +105,8 @@ async def generate(
     }
     if json_output:
         payload["format"] = "json"
-    timeout = httpx.Timeout(float(OLLAMA_TIMEOUT_SECONDS), connect=8.0)
+    request_timeout = OLLAMA_TIMEOUT_SECONDS if timeout_seconds is None else max(10, min(int(timeout_seconds), 600))
+    timeout = httpx.Timeout(float(request_timeout), connect=8.0)
     try:
         async with _semaphore:
             async with httpx.AsyncClient(timeout=timeout, headers=_headers()) as client:
