@@ -958,7 +958,7 @@ def _require_online_ai_worker(user_id: str) -> dict[str, Any]:
 async def _run_local_ai_job(user_id: str, job_type: str, messages: list[dict[str, str]],
                             temperature: float = 0.2, timeout_seconds: int = 90) -> dict[str, Any]:
     _require_ai_enabled(user_id)
-    if hosted_ollama.AI_BACKEND_MODE == "hosted":
+    if hosted_ollama.AI_BACKEND_MODE == "hosted" or hosted_ollama.active_provider() == "gemini":
         return await hosted_ollama.generate(
             messages,
             temperature=temperature,
@@ -1166,7 +1166,7 @@ async def hosted_model_status(session: str | None = Cookie(default=None, alias=S
     user_id = str(user["id"])
     ai_enabled = _user_ai_enabled(user_id)
 
-    if hosted_ollama.AI_BACKEND_MODE == "hosted":
+    if hosted_ollama.AI_BACKEND_MODE == "hosted" or hosted_ollama.active_provider() == "gemini":
         status = await hosted_ollama.model_status()
         if not ai_enabled:
             status["detail"] = "AI analysis is disabled in Settings. Enable it to use hosted Ollama."
