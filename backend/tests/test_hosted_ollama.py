@@ -157,7 +157,7 @@ def test_gemini_hosted_job_does_not_require_private_worker(monkeypatch):
 def test_hosted_chat_returns_the_actual_gemini_provider(monkeypatch):
     from gmail_agent import public_app
 
-    async def fake_generate(messages, *, temperature=0.2, json_output=False, timeout_seconds=None):
+    async def fake_generate(user_id, job_type, messages, temperature=0.2, timeout_seconds=90):
         return {"content": "Verified Gemini answer", "provider": "gemini", "model": "gemini-test"}
 
     monkeypatch.setattr(public_app, "_current_user", lambda _session: {"id": "tenant-a"})
