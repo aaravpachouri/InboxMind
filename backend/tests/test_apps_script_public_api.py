@@ -129,7 +129,7 @@ def test_reply_body_formatter_preserves_and_adds_readable_paragraphs() -> None:
         "whether the activity was authorized, and whether any account settings were modified."
     )
     formatted = public_app._format_reply_body(body)
-    assert "\\n\\n" in formatted
+    assert "\n\n" in formatted
     assert "sign-in notification" in formatted
     assert "account settings were modified" in formatted
 
