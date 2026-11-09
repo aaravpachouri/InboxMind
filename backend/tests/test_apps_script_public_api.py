@@ -136,9 +136,9 @@ def test_reply_body_formatter_preserves_and_adds_readable_paragraphs() -> None:
 
 def test_reply_body_formatter_preserves_existing_paragraphs_and_removes_model_labels() -> None:
     formatted = public_app._format_reply_body(
-        "Suggested reply: Hello, thanks for the update.\\n\\nI will review this and get back to you."
+        "Suggested reply: Hello, thanks for the update.\n\nI will review this and get back to you."
     )
-    assert formatted == "Hello, thanks for the update.\\n\\nI will review this and get back to you."
+    assert formatted == "Hello, thanks for the update.\n\nI will review this and get back to you."
 
 
 def test_reply_generation_prompt_requires_contextual_professional_paragraphs() -> None:
