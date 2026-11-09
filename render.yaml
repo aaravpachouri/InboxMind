@@ -32,8 +32,20 @@ services:
         value: https://inboxmind-aaravpachouri.vercel.app
       - key: AUTO_SYNC_ENABLED
         value: "false"
-      - key: AI_ENABLED
-        value: "false"
+      - key: AI_BACKEND_MODE
+        value: hosted
+      - key: OLLAMA_BASE_URL
+        sync: false
+      - key: OLLAMA_API_KEY
+        sync: false
+      - key: OLLAMA_MODEL
+        value: llama3.2:3b
+      - key: OLLAMA_TIMEOUT_SECONDS
+        value: "120"
+      - key: OLLAMA_MAX_CONCURRENCY
+        value: "4"
+      - key: OLLAMA_KEEP_ALIVE
+        value: 5m
       - key: APPS_SCRIPT_BRIDGE_URL
         value: ""
       - key: APPS_SCRIPT_BRIDGE_SECRET
