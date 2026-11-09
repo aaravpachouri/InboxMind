@@ -770,17 +770,22 @@ export default function App() {
 
     setBusy(isReply ? 'draft-reply' : 'ai-new-draft');
     try {
-      // Preflight the local model before any endpoint can create a draft. This avoids
-      // silently producing a heuristic/fallback draft when the user explicitly chose local AI.
-      const cachedModelReady = Boolean(model?.available && ['ollama', 'local', 'gemini'].includes((model.provider || '').toLowerCase()));
-      const modelCheck = cachedModelReady ? model as ModelStatus : await api<ModelStatus>('/system/model');
-      const modelProvider = (modelCheck.provider || '').toLowerCase();
-      if (!modelCheck.available || !['ollama', 'local', 'gemini'].includes(modelProvider)) {
+      // The backend is authoritative for provider selection and readiness.
+      // Do not block hosted Gemini drafts using stale/local-worker UI state; the
+      // draft endpoint performs its own AI-enabled and provider checks and never
+      // saves a fabricated result.
+      try {
+        const modelCheck = await api<ModelStatus>('/system/model');
         setModel(modelCheck);
-        throw new Error(`Configured AI provider is not ready${modelCheck.detail ? `: ${modelCheck.detail}` : '.'} Start the configured model and retry; no new draft was requested.`);
+        setModelStatusUnavailable(false);
+        if (modelCheck.ai_enabled === false) {
+          throw new Error('AI is disabled in Settings. Enable AI to generate a reply draft.');
+        }
+      } catch (statusError) {
+        if (statusError instanceof ApiError && statusError.status === 403) throw statusError;
+        // Continue to the actual draft endpoint: it provides the definitive provider error.
+        setModelStatusUnavailable(true);
       }
-      setModel(modelCheck);
-      setModelStatusUnavailable(false);
       if (saveWritingDefaults) await persistWritingProfile();
 
       let result: DraftItem;
