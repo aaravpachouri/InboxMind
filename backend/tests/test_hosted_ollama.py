@@ -77,3 +77,51 @@ def test_public_ai_job_routes_to_hosted_ollama_without_private_worker(monkeypatc
     assert result["provider"] == "ollama"
     assert calls["json_output"] is True
     assert calls["timeout_seconds"] == 47
+
+
+
+def test_gemini_key_selects_gemini_provider(monkeypatch):
+    monkeypatch.setattr(hosted_ollama, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(hosted_ollama, "OLLAMA_BASE_URL", "https://ollama.example")
+    assert hosted_ollama.active_provider() == "gemini"
+
+
+def test_missing_gemini_key_keeps_ollama_provider(monkeypatch):
+    monkeypatch.setattr(hosted_ollama, "GEMINI_API_KEY", "")
+    monkeypatch.setattr(hosted_ollama, "OLLAMA_BASE_URL", "https://ollama.example")
+    assert hosted_ollama.active_provider() == "ollama"
+
+
+def test_generate_routes_to_gemini_when_key_is_configured(monkeypatch):
+    calls = {}
+
+    async def fake_gemini(messages, *, temperature, json_output, timeout_seconds):
+        calls["messages"] = messages
+        calls["json_output"] = json_output
+        return {"content": '{"summary":"ok"}', "provider": "gemini", "model": "gemini-test"}
+
+    monkeypatch.setattr(hosted_ollama, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(hosted_ollama, "GEMINI_MODEL", "gemini-test")
+    monkeypatch.setattr(hosted_ollama, "_generate_gemini", fake_gemini)
+
+    result = asyncio.run(hosted_ollama.generate(
+        [{"role": "system", "content": "Be safe."}, {"role": "user", "content": "Summarize this."}],
+        json_output=True,
+    ))
+
+    assert result["provider"] == "gemini"
+    assert result["model"] == "gemini-test"
+    assert calls["json_output"] is True
+    assert len(calls["messages"]) == 2
+
+
+def test_gemini_model_status_is_selected_when_key_exists(monkeypatch):
+    async def fake_status():
+        return {"available": True, "provider": "gemini", "model": "gemini-test", "detail": "ready"}
+
+    monkeypatch.setattr(hosted_ollama, "GEMINI_API_KEY", "test-key")
+    monkeypatch.setattr(hosted_ollama, "_gemini_model_status", fake_status)
+    status = asyncio.run(hosted_ollama.model_status())
+
+    assert status["available"] is True
+    assert status["provider"] == "gemini"
