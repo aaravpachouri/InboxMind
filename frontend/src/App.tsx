@@ -1198,7 +1198,7 @@ export default function App() {
         <form className="modal-form" onSubmit={submitTask}>
           <label>Task name<input autoFocus value={taskTitle} onChange={(event) => setTaskTitle(event.target.value)} placeholder="e.g. Reply to the admissions office" required maxLength={500} /></label>
           <div className="form-row"><label>Due date<input type="date" value={taskDue} onChange={(event) => setTaskDue(event.target.value)} /></label><label>Priority<select value={taskPriority} onChange={(event) => setTaskPriority(event.target.value as typeof taskPriority)}><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="urgent">Urgent</option></select></label></div>
-          <div className="modal-actions"><button type="button" className="button-secondary" onClick={() => setTaskModalOpen(false)}>Cancel</button><button className="button-primary" disabled={busy === 'create-task'}>{busy === 'create-task' ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Add task</button></div>
+          <div className="modal-actions"><button type="button" className="button-secondary" onClick={() => setTaskModalOpen(false)}>Cancel</button><button className="button-primary" disabled={false}>{busy === 'create-task' ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Add task</button></div>
         </form>
       </Modal>}
 
