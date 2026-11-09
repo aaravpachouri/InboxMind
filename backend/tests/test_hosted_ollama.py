@@ -13,7 +13,7 @@ def test_hosted_mode_fails_closed_when_endpoint_is_not_configured(monkeypatch):
     with pytest.raises(HTTPException) as error:
         asyncio.run(hosted_ollama.generate([{"role": "user", "content": "hello"}]))
     assert error.value.status_code == 503
-    assert "no result was fabricated" in str(error.value.detail)
+    assert "no result was fabricated" in str(error.value.detail).lower()
 
 
 def test_hosted_status_reports_missing_configuration(monkeypatch):
