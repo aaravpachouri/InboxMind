@@ -1151,6 +1151,19 @@ export default function App() {
             mailboxLoading={mailboxLoading} mailboxError={mailboxError} onReloadInbox={() => { void loadEmails(gmailQuery, null, auth?.connected); }} onCompose={() => openWritingStudio('new')}
             onOpenEmail={selectEmail} onNavigate={go} onSync={runSync} syncBusy={busy === 'sync'} onRefreshAll={() => { void refreshAll(); }} refreshBusy={busy === 'refresh'} onRefreshBriefing={async () => {
               setBusy('briefing'); try { setBriefing(await api<Briefing>('/briefing/daily?hours=24')); notify('Briefing refreshed.'); } catch (error) { notify(errorText(error), 'error'); } finally { setBusy(null); }
+            }} onCreateProposedTask={async (proposal) => {
+              setBusy('create-task');
+              try {
+                const created = await api<TaskItem>('/tasks', { method: 'POST', body: JSON.stringify({
+                  title: proposal.title,
+                  description: [proposal.description, proposal.evidence_quote ? 'Evidence: ' + proposal.evidence_quote : '', proposal.source_subject ? 'Source email: ' + proposal.source_subject : ''].filter(Boolean).join('\n'),
+                  priority: proposal.priority || 'medium', due_date: proposal.due_date || null, source_email_id: proposal.source_email_id,
+                }) });
+                setTasks((current) => [created, ...current]);
+                setBriefing((current) => current ? { ...current, proposed_tasks: (current.proposed_tasks || []).filter((item) => !(item.source_email_id === proposal.source_email_id && item.title === proposal.title)) } : current);
+                notify('Task approved and added.');
+              } catch (error) { notify(errorText(error), 'error'); }
+              finally { setBusy(null); }
             }} briefingBusy={busy === 'briefing'} />}
           {(view === 'inbox' || view === 'priority') && <InboxView
             view={view} emails={filteredEmails} totalEstimate={totalEstimate} source={mailSource} mailFilter={mailFilter} setMailFilter={setMailFilter}
@@ -1273,9 +1286,9 @@ function PriorityBadge({ value }: { value?: string }) {
 function LoadingLine({ label = 'Loading your workspace…' }: { label?: string }) { return <div className="loading-state"><LoaderCircle size={19} className="spin" /><span>{label}</span></div>; }
 function EmptyState({ icon: Icon = Inbox, title, detail, action }: { icon?: typeof Inbox; title: string; detail: string; action?: ReactNode }) { return <div className="empty-state"><div className="empty-icon"><Icon size={22} /></div><strong>{title}</strong><p>{detail}</p>{action}</div>; }
 
-function OverviewView({ auth, insights, model, briefing, emails, mailSource, tasks, calendarEvents, backendOnline, loading, authStatusUnavailable, modelStatusUnavailable, mailboxLoading, mailboxError, onReloadInbox, onCompose, onOpenEmail, onNavigate, onSync, syncBusy, onRefreshAll, refreshBusy, onRefreshBriefing, briefingBusy }: {
+function OverviewView({ auth, insights, model, briefing, emails, mailSource, tasks, calendarEvents, backendOnline, loading, authStatusUnavailable, modelStatusUnavailable, mailboxLoading, mailboxError, onReloadInbox, onCompose, onOpenEmail, onNavigate, onSync, syncBusy, onRefreshAll, refreshBusy, onRefreshBriefing, onCreateProposedTask, briefingBusy }: {
   auth: AuthStatus | null; insights: Insights | null; model: ModelStatus | null; briefing: Briefing | null; emails: EmailSummary[]; mailSource: 'gmail' | 'cache' | null; tasks: TaskItem[]; calendarEvents: CalendarEvent[]; backendOnline: boolean; loading: boolean; authStatusUnavailable: boolean; modelStatusUnavailable: boolean; mailboxLoading: boolean; mailboxError: string | null;
-  onReloadInbox: () => void; onCompose: () => void; onOpenEmail: (item: EmailSummary) => void; onNavigate: (view: View) => void; onSync: () => void; syncBusy: boolean; onRefreshAll: () => void; refreshBusy: boolean; onRefreshBriefing: () => void; briefingBusy: boolean;
+  onReloadInbox: () => void; onCompose: () => void; onOpenEmail: (item: EmailSummary) => void; onNavigate: (view: View) => void; onSync: () => void; syncBusy: boolean; onRefreshAll: () => void; refreshBusy: boolean; onRefreshBriefing: () => void; onCreateProposedTask: (proposal: NonNullable<Briefing['proposed_tasks']>[number]) => void; briefingBusy: boolean;
 }) {
   const priority = emails.filter((item) => ['urgent', 'high'].includes((item.priority || '').toLowerCase()));
   const glanceEmails = [...priority, ...emails.filter((item) => !priority.some((urgent) => urgent.id === item.id))].slice(0, 5);
@@ -1385,7 +1398,8 @@ function OverviewView({ auth, insights, model, briefing, emails, mailSource, tas
         <p className="quick-plan-intro">A short list of the commitments waiting for your attention.</p>
         <div className="quick-plan-divider" />
         <div className="quick-next-head"><strong>Next up</strong><button onClick={() => onNavigate('tasks')}>All tasks <ArrowRight size={13} /></button></div>
-        {nextTasks.length ? <div className="quick-next-list">{nextTasks.map((task) => <button key={task.id} className="quick-next-task" onClick={() => onNavigate('tasks')}><span className="quick-task-ring"><Circle size={15} /></span><span><strong>{task.title}</strong><small>{task.due_date ? `Due ${formatDate(task.due_date, 'date')}` : 'No due date'}</small></span><PriorityBadge value={task.priority} /></button>)}</div> : <div className="quick-task-empty"><CheckCheck size={16} /><span>Nothing pressing. Any new commitments will appear here.</span></div>}
+        {nextTasks.length ? <div className="quick-next-list">{nextTasks.map((task) => <button key={task.id} className="quick-next-task" onClick={() => onNavigate('tasks')}><span className="quick-task-ring"><Circle size={15} /></span><span><strong>{task.title}</strong><small>{task.due_date ? `Due ${formatDate(task.due_date, 'date')}` : 'No due date'}</small></span><PriorityBadge value={task.priority} /></button>)}</div> : <div className="quick-task-empty"><CheckCheck size={16} /><span>No saved tasks yet. AI suggestions will appear below for your review.</span></div>}
+        {briefing?.proposed_tasks?.length ? <div className="quick-proposed-tasks"><div className="quick-proposed-heading"><Sparkles size={13} /><strong>Possible tasks from email</strong><span>{briefing.proposed_tasks.length}</span></div>{briefing.proposed_tasks.slice(0, 3).map((proposal, index) => <div className="quick-proposed-task" key={proposal.source_email_id + proposal.title + index}><div><strong>{proposal.title}</strong><small>{proposal.source_subject} · {Math.round(proposal.confidence * 100)}% confidence</small><q>{proposal.evidence_quote}</q></div><button className="quick-proposed-approve" onClick={() => onCreateProposedTask(proposal)} disabled={false} title="Approve and add to your task list"><Check size={14} /> Add</button></div>)}</div> : null}
         <div className="quick-plan-actions"><button className="quick-panel-link" onClick={() => onNavigate('tasks')}>Review tasks <ArrowRight size={14} /></button><button className="quick-panel-link" onClick={() => onNavigate('assistant')}>Ask inboxmind <ArrowRight size={14} /></button></div>
       </aside>
     </section>
