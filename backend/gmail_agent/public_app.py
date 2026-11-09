@@ -963,6 +963,7 @@ async def _run_local_ai_job(user_id: str, job_type: str, messages: list[dict[str
             messages,
             temperature=temperature,
             json_output=(job_type == "analyze_email"),
+            timeout_seconds=timeout_seconds,
         )
     if hosted_ollama.AI_BACKEND_MODE != "private_worker":
         raise HTTPException(503, "AI backend mode is invalid. AI is unavailable; no result was fabricated.")
