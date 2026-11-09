@@ -9,7 +9,13 @@ This worker runs Ollama on your own Windows PC and connects outward to InboxMind
 - Ollama installed and running locally
 - A model installed in Ollama (default: `llama3.2:3b`; change it with `INBOXMIND_OLLAMA_MODEL` if needed)
 
-## Install
+## One-click Windows launcher
+
+Run `START_INBOXMIND_AGENT.bat` from this folder. It creates the virtual environment if needed, installs the worker dependencies, checks that Ollama is running, and starts the worker. On first run it securely prompts for the one-time worker token and stores it in Windows Credential Manager.
+
+To also register the worker to start automatically at Windows sign-in, run `START_INBOXMIND_AGENT.bat install-autostart`. This creates the scheduled task and then starts the worker in the current window. The first-time setup and API/model requirements below still apply.
+
+## Install manually
 
 1. In InboxMind, open **Settings → Private AI worker** and click **Register this PC**. Copy the one-time worker token. Do not share it.
 2. Open this `worker` folder in Command Prompt or PowerShell.
