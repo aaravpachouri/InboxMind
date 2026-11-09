@@ -25,6 +25,8 @@ from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from gmail_agent import hosted_ollama
 
+hosted_ollama.validate_configuration()
+
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
