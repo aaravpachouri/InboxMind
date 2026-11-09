@@ -43,3 +43,37 @@ def test_hosted_ollama_requires_tls_for_non_loopback_endpoints(monkeypatch):
     monkeypatch.setattr(hosted_ollama, "OLLAMA_BASE_URL", "http://ollama.example")
     with pytest.raises(RuntimeError, match="HTTPS"):
         hosted_ollama.validate_configuration()
+
+
+
+def test_public_ai_job_routes_to_hosted_ollama_without_private_worker(monkeypatch):
+    from gmail_agent import public_app
+
+    calls = {}
+
+    async def fake_generate(messages, *, temperature=0.2, json_output=False, timeout_seconds=None):
+        calls["messages"] = messages
+        calls["temperature"] = temperature
+        calls["json_output"] = json_output
+        calls["timeout_seconds"] = timeout_seconds
+        return {"content": "verified response", "provider": "ollama", "model": "llama3.2:3b"}
+
+    monkeypatch.setattr(hosted_ollama, "AI_BACKEND_MODE", "hosted")
+    monkeypatch.setattr(hosted_ollama, "generate", fake_generate)
+    monkeypatch.setattr(public_app, "_require_ai_enabled", lambda _user_id: None)
+
+    async def fail_if_worker_used(_user_id):
+        raise AssertionError("hosted mode must not require a personal Windows worker")
+
+    monkeypatch.setattr(public_app, "_require_online_ai_worker", fail_if_worker_used)
+    result = asyncio.run(public_app._run_local_ai_job(
+        "tenant-a",
+        "analyze_email",
+        [{"role": "user", "content": "summarize safely"}],
+        timeout_seconds=47,
+    ))
+
+    assert result["content"] == "verified response"
+    assert result["provider"] == "ollama"
+    assert calls["json_output"] is True
+    assert calls["timeout_seconds"] == 47
