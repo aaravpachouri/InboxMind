@@ -151,3 +151,25 @@ def test_gemini_hosted_job_does_not_require_private_worker(monkeypatch):
 
     assert result["content"] == "Gemini response"
     assert result["provider"] == "gemini"
+
+
+
+def test_hosted_chat_returns_the_actual_gemini_provider(monkeypatch):
+    from gmail_agent import public_app
+
+    async def fake_generate(messages, *, temperature=0.2, json_output=False, timeout_seconds=None):
+        return {"content": "Verified Gemini answer", "provider": "gemini", "model": "gemini-test"}
+
+    monkeypatch.setattr(public_app, "_current_user", lambda _session: {"id": "tenant-a"})
+    monkeypatch.setattr(public_app, "_require_csrf", lambda _request, _user: None)
+    monkeypatch.setattr(public_app, "_run_local_ai_job", fake_generate)
+    monkeypatch.setattr(hosted_ollama, "active_provider", lambda: "gemini")
+
+    result = asyncio.run(public_app.chat_unavailable(
+        {"message": "What needs attention?", "include_recent_emails": False},
+        None,
+        None,
+    ))
+
+    assert result["answer"] == "Verified Gemini answer"
+    assert result["ai_provider"] == "gemini"
