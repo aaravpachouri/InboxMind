@@ -1698,15 +1698,14 @@ async def _get_bridge_email(user: dict[str, Any], message_id: str) -> dict[str, 
 
 def _format_reply_body(value: str) -> str:
     """Normalize generated reply text while preserving intentional paragraph breaks."""
-    text = str(value or "").replace("\\r\\n", "\\n").replace("\\r", "\\n").strip()
-    text = re.sub(r"^\\s*```(?:text|markdown)?\\s*|\\s*```\\s*$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^\\s*(?:Reply|Draft|Suggested reply)\\s*:\\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"[ \\t]+\\n", "\\n", text)
-    text = re.sub(r"\\n{3,}", "\\n\\n", text)
-    paragraphs = [re.sub(r"\\s+", " ", part).strip() for part in re.split(r"\\n\\s*\\n", text) if part.strip()]
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = re.sub(r"^\s*(?:Reply|Draft|Suggested reply)\s*:\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    paragraphs = [re.sub(r"\s+", " ", part).strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
     formatted: list[str] = []
     for paragraph in paragraphs:
-        sentences = re.split(r"(?<=[.!?])\\s+(?=[A-Z0-9])", paragraph)
+        sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", paragraph)
         if len(sentences) >= 3 and len(paragraph) > 260:
             group: list[str] = []
             group_length = 0
@@ -1720,7 +1719,7 @@ def _format_reply_body(value: str) -> str:
                 formatted.append(" ".join(group))
         else:
             formatted.append(paragraph)
-    return "\\n\\n".join(formatted).strip()
+    return "\n\n".join(formatted).strip()
 
 
 def _email_messages(email: dict[str, Any], instruction: str, *, json_output: bool = False) -> list[dict[str, str]]:
