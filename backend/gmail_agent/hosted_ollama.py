@@ -14,7 +14,9 @@ OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "").strip()
 OLLAMA_TIMEOUT_SECONDS = max(10, min(int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "120")), 600))
 OLLAMA_MAX_CONCURRENCY = max(1, min(int(os.getenv("OLLAMA_MAX_CONCURRENCY", "4")), 32))
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "5m")
-AI_BACKEND_MODE = os.getenv("AI_BACKEND_MODE", "hosted").strip().lower()
+# Match InboxMind's original working setup: each user runs Ollama on their own PC.
+# Hosted inference remains an explicit opt-in mode, not the production default.
+AI_BACKEND_MODE = os.getenv("AI_BACKEND_MODE", "private_worker").strip().lower()
 _semaphore = asyncio.Semaphore(OLLAMA_MAX_CONCURRENCY)
 
 
@@ -25,7 +27,11 @@ def configured() -> bool:
 def validate_configuration() -> None:
     if AI_BACKEND_MODE not in {"hosted", "private_worker"}:
         raise RuntimeError("AI_BACKEND_MODE must be 'hosted' or 'private_worker'.")
-    if not configured():
+    if AI_BACKEND_MODE == "hosted" and not configured():
+        # Allow the service to start while hosted inference is being provisioned;
+        # requests fail closed with a clear 503 until the endpoint is configured.
+        return
+    if AI_BACKEND_MODE != "hosted" or not configured():
         return
     parsed = urlparse(OLLAMA_BASE_URL)
     if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
