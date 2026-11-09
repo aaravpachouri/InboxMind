@@ -119,3 +119,31 @@ def test_daily_briefing_rejects_invalid_worker_json_without_fabricating() -> Non
     source = inspect.getsource(public_app.daily_briefing)
     assert "Private AI worker returned invalid JSON" in source
     assert "No result was fabricated" in source
+
+
+def test_reply_body_formatter_preserves_and_adds_readable_paragraphs() -> None:
+    body = (
+        "I hope you are having a good week. I am following up regarding the recent sign-in "
+        "notification for my Vercel account. Could you share the details available about this "
+        "event? Specifically, I would like to know the sign-in time, associated IP address, "
+        "whether the activity was authorized, and whether any account settings were modified."
+    )
+    formatted = public_app._format_reply_body(body)
+    assert "\\n\\n" in formatted
+    assert "sign-in notification" in formatted
+    assert "account settings were modified" in formatted
+
+
+def test_reply_body_formatter_preserves_existing_paragraphs_and_removes_model_labels() -> None:
+    formatted = public_app._format_reply_body(
+        "Suggested reply: Hello, thanks for the update.\\n\\nI will review this and get back to you."
+    )
+    assert formatted == "Hello, thanks for the update.\\n\\nI will review this and get back to you."
+
+
+def test_reply_generation_prompt_requires_contextual_professional_paragraphs() -> None:
+    source = inspect.getsource(public_app.draft_reply_unavailable)
+    assert "context-aware business email reply" in source
+    assert "Avoid repeating the sender's entire message" in source
+    assert "2-4 short paragraphs" in source
+    assert "_format_reply_body" in source
