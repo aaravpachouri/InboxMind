@@ -62,7 +62,7 @@ def test_public_ai_job_routes_to_hosted_ollama_without_private_worker(monkeypatc
     monkeypatch.setattr(hosted_ollama, "generate", fake_generate)
     monkeypatch.setattr(public_app, "_require_ai_enabled", lambda _user_id: None)
 
-    async def fail_if_worker_used(_user_id):
+    def fail_if_worker_used(_user_id):
         raise AssertionError("hosted mode must not require a personal Windows worker")
 
     monkeypatch.setattr(public_app, "_require_online_ai_worker", fail_if_worker_used)
