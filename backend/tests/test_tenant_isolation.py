@@ -78,3 +78,20 @@ def test_current_user_is_derived_only_from_hashed_unrevoked_session():
     assert "_hash(session_cookie)" in source
     assert "s.revoked_at IS NULL" in source
     assert "s.expires_at > now()" in source
+
+
+
+def test_draft_send_is_atomically_claimed_and_delete_requires_confirmation():
+    send_source = inspect.getsource(public_app.send_draft)
+    delete_source = inspect.getsource(public_app.delete_draft)
+
+    assert "status='sending'" in send_source
+    assert "AND status='draft' AND gmail_draft_id IS NOT NULL" in send_source
+    assert "WHERE user_id=%s AND id=%s AND status='sending'" in send_source
+    assert "Explicitly confirm sending this email." in send_source
+
+    assert "body: EmailActionRequest" in delete_source
+    assert "if not body.confirm" in delete_source
+    assert "Confirm deleting this draft" in delete_source
+    assert "status <> 'sending'" in delete_source
+    assert "_require_csrf(request, user)" in delete_source
