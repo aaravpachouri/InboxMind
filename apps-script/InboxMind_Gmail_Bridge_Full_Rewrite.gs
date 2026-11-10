@@ -21,18 +21,26 @@ function doPost(e) {
       return jsonOutput_({ ok: false, error: "Request too large" });
     }
     const request = JSON.parse(e.postData.contents);
+    if (!request || typeof request !== "object" || Array.isArray(request)) {
+      return jsonOutput_({ ok: false, error: "Invalid request" });
+    }
     const savedSecret = PropertiesService.getScriptProperties().getProperty("BRIDGE_SECRET");
-    if (!constantTimeEqual_(request.secret, savedSecret)) {
+    if (!savedSecret || !constantTimeEqual_(request.secret, savedSecret)) {
       return jsonOutput_({ ok: false, error: "Unauthorized" });
     }
-    const params = request.params || {};
-    const result = dispatchAction_(String(request.action || ""), params);
+    if (typeof request.action !== "string" || request.action.length > 64) {
+      return jsonOutput_({ ok: false, error: "Invalid action" });
+    }
+    const params = request.params === undefined ? {} : request.params;
+    if (!params || typeof params !== "object" || Array.isArray(params)) {
+      return jsonOutput_({ ok: false, error: "Invalid parameters" });
+    }
+    const result = dispatchAction_(request.action, params);
     return jsonOutput_({ ok: true, result: result });
   } catch (err) {
-    return jsonOutput_({
-      ok: false,
-      error: String(err && err.message ? err.message : err).slice(0, 500)
-    });
+    console.error("InboxMind bridge request failed: " +
+      String(err && err.message ? err.message : "unknown error").slice(0, 160));
+    return jsonOutput_({ ok: false, error: "Request failed. Check the action and parameters." });
   }
 }
 
@@ -105,7 +113,29 @@ function dispatchAction_(action, p) {
 
 function requiredString_(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new Error("Missing required field: " + name);
-  return value.trim();
+  const clean = value.trim();
+  if (clean.length > 2048 || /[\\u0000-\\u001f\\u007f]/.test(clean)) throw new Error("Invalid field: " + name);
+  if (name === "message_id" || name === "thread_id" || name === "draft_id" || name === "attachment_id") {
+    if (!/^[A-Za-z0-9_-]{1,256}$/.test(clean)) throw new Error("Invalid field: " + name);
+  }
+  return clean;
+}
+
+function boundedText_(value, name, maxLength, allowEmpty) {
+  if (value === undefined || value === null) value = "";
+  if (typeof value !== "string") throw new Error("Invalid field: " + name);
+  if ((!allowEmpty && !value.trim()) || value.length > maxLength) throw new Error("Invalid field: " + name);
+  return value;
+}
+
+function boundedStringArray_(value, name, maxItems, maxLength) {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.length > maxItems) throw new Error("Invalid field: " + name);
+  return value.map(function (item) {
+    const clean = requiredString_(item, name);
+    if (clean.length > maxLength) throw new Error("Invalid field: " + name);
+    return clean;
+  });
 }
 
 function requireConfirmation_(p, operation) {
@@ -148,12 +178,17 @@ function getProfile_() {
 }
 
 function listEmails_(p) {
-  const pageSize = Math.max(1, Math.min(10, Number(p.max_results) || 10));
+  const requestedSize = p.max_results === undefined ? 10 : Number(p.max_results);
+  if (!Number.isInteger(requestedSize) || requestedSize < 1 || requestedSize > 10) throw new Error("Invalid max_results");
   const options = {
-    q: String(p.query || "in:anywhere").slice(0, 500),
-    maxResults: pageSize
+    q: boundedText_(p.query === undefined ? "in:anywhere" : p.query, "query", 500, false),
+    maxResults: requestedSize
   };
-  if (p.page_token && String(p.page_token) !== "0") options.pageToken = String(p.page_token);
+  if (p.page_token && String(p.page_token) !== "0") {
+    const pageToken = requiredString_(String(p.page_token), "page_token");
+    if (!/^[A-Za-z0-9_=-]{1,2048}$/.test(pageToken)) throw new Error("Invalid page_token");
+    options.pageToken = pageToken;
+  }
   const response = withGmailRetry_("list messages", function () {
     return Gmail.Users.Messages.list(USER_ID, options);
   });
@@ -415,10 +450,10 @@ function threadAction_(messageId, action, p) {
 }
 
 function batchModify_(p) {
-  const ids = Array.isArray(p.message_ids) ? p.message_ids : [];
-  const add = Array.isArray(p.add_labels) ? p.add_labels : [];
-  const remove = Array.isArray(p.remove_labels) ? p.remove_labels : [];
-  if (ids.length > MAX_MESSAGES) throw new Error("Maximum " + MAX_MESSAGES + " messages per batch");
+  const ids = boundedStringArray_(p.message_ids, "message_id", MAX_MESSAGES, 256);
+  const add = boundedStringArray_(p.add_labels, "add_labels", 50, 225);
+  const remove = boundedStringArray_(p.remove_labels, "remove_labels", 50, 225);
+  if (!ids.length) throw new Error("At least one message is required");
   const addsUpper = add.map(function (x) { return String(x).toUpperCase(); });
   if (addsUpper.indexOf("TRASH") !== -1 || addsUpper.indexOf("SPAM") !== -1) {
     requireConfirmation_(p, "Bulk moving emails to Trash or Spam");
@@ -431,8 +466,13 @@ function sanitizeHeader_(value) {
 }
 
 function recipientString_(value) {
-  if (Array.isArray(value)) return value.map(sanitizeHeader_).filter(Boolean).join(", ");
-  return sanitizeHeader_(value);
+  const recipients = Array.isArray(value) ? value : (value ? [value] : []);
+  if (recipients.length > 50) throw new Error("Too many recipients");
+  return recipients.map(function (item) {
+    const address = boundedText_(item, "recipient", 320, false).replace(/[\\r\\n\\x00-\\x1f\\x7f]/g, "").trim();
+    if (!/^[^\\s@,;<>]+@[^\\s@,;<>]+\\.[^\\s@,;<>]+$/.test(address)) throw new Error("Invalid recipient address");
+    return address;
+  }).join(", ");
 }
 
 function encodeSubject_(subject) {
@@ -467,8 +507,9 @@ function createDraft_(p) {
   let subject = sanitizeHeader_(p.subject);
   const cc = recipientString_(p.cc_addresses);
   const bcc = recipientString_(p.bcc_addresses);
-  const body = String(p.body_text || "");
+  const body = boundedText_(p.body_text, "body_text", 500000, false);
   if (!body.trim()) throw new Error("Draft body cannot be empty");
+  subject = boundedText_(subject, "subject", 998, true);
   let threadId = "";
   let replyHeaders = null;
   if (p.thread_id) {
@@ -518,8 +559,9 @@ function sendMessage_(p) {
   const cc = recipientString_(p.cc_addresses);
   const bcc = recipientString_(p.bcc_addresses);
   const subject = sanitizeHeader_(p.subject);
-  const body = String(p.body_text || "");
+  const body = boundedText_(p.body_text, "body_text", 500000, false);
   if (!to || !body.trim()) throw new Error("Recipient and message body are required");
+  if (subject.length > 998) throw new Error("Subject is too long");
   const raw = buildRawMessage_(to, cc, bcc, subject, body, null);
   const sent = Gmail.Users.Messages.send({ raw: raw }, USER_ID);
   return { id: sent.id || "", threadId: sent.threadId || "", sent: true };
@@ -558,12 +600,16 @@ function createCalendarEvent_(p) {
   if (isNaN(start.getTime()) || isNaN(end.getTime()) || end <= start) throw new Error("Invalid calendar event dates");
   const event = {
     summary: summary,
-    description: String(p.description || ""),
+    description: boundedText_(p.description, "description", 8000, true),
     start: { dateTime: start.toISOString(), timeZone: "Asia/Kolkata" },
     end: { dateTime: end.toISOString(), timeZone: "Asia/Kolkata" }
   };
-  if (Array.isArray(p.attendees) && p.attendees.length) {
-    event.attendees = p.attendees.map(function (email) { return { email: requiredString_(email, "attendee email") }; });
+  const attendees = boundedStringArray_(p.attendees, "attendees", 50, 320);
+  if (attendees.length) {
+    event.attendees = attendees.map(function (email) {
+      if (!/^[^\\s@,;<>]+@[^\\s@,;<>]+\\.[^\\s@,;<>]+$/.test(email)) throw new Error("Invalid attendee email");
+      return { email: email };
+    });
   }
   const created = Calendar.Events.insert(event, "primary", { sendUpdates: "none" });
   return serializeCalendarEvent_(created);
