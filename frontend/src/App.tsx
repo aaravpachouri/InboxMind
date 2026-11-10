@@ -1079,12 +1079,9 @@ export default function App() {
   ];
 
   if (!sessionChecked) return <AccountAccess checking />;
-  if (!accountAuthenticated) return <AccountAccess onAuthenticated={async () => {
+  if (!accountAuthenticated) return <AccountAccess onAuthenticated={() => {
     setAccountAuthenticated(true);
     setSessionChecked(true);
-    initialLoadStarted.current = false;
-    await loadCore(true);
-    initialLoadStarted.current = true;
   }} />;
 
   return (
