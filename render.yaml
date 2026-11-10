@@ -32,11 +32,11 @@ services:
         value: https://inboxmind-aaravpachouri.vercel.app
       - key: AUTO_SYNC_ENABLED
         value: "false"
-      # Use the existing outbound Windows worker; Ollama stays on the user's PC.
+      # All inference runs on InboxMind's hosted provider, never on a user's computer.
       - key: AI_BACKEND_MODE
-        value: private_worker
-      - key: OLLAMA_MODEL
-        value: llama3.2:3b
+        value: hosted
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash-lite
       - key: APPS_SCRIPT_BRIDGE_URL
         value: ""
       - key: APPS_SCRIPT_BRIDGE_SECRET
