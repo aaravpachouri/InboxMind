@@ -3,6 +3,10 @@
 -- until the feature branch is deployed and the migration runner is executed.
 BEGIN;
 
+-- Email/password users do not have a Google subject. Keep the existing Google subject unique
+-- when present, but allow NULL for accounts authenticated by another provider.
+ALTER TABLE app_users ALTER COLUMN google_sub DROP NOT NULL;
+
 ALTER TABLE app_users
     ADD COLUMN IF NOT EXISTS password_hash TEXT,
     ADD COLUMN IF NOT EXISTS email_verification_hash BYTEA,
@@ -12,7 +16,10 @@ ALTER TABLE app_users
     ADD COLUMN IF NOT EXISTS password_reset_expires_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS is_platform_admin BOOLEAN NOT NULL DEFAULT FALSE;
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_app_users_email_normalized
+-- Do not impose global case-insensitive uniqueness here: legacy Apps Script and Google
+-- sign-ins may already represent the same mailbox as separate identities. Account linking
+-- must be an explicit verified flow before uniqueness can safely be enforced.
+CREATE INDEX IF NOT EXISTS idx_app_users_email_normalized
     ON app_users (lower(email));
 
 CREATE TABLE IF NOT EXISTS auth_email_events (
