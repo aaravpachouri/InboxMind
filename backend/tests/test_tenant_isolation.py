@@ -51,7 +51,12 @@ def test_private_database_routes_set_transaction_local_tenant_context():
     }
     for name in route_names:
         source = inspect.getsource(getattr(public_app, name))
-        assert '_set_user_context(conn, str(user["id"]))' in source, name
+        expected_context = (
+            "_set_user_context(conn, user_id)"
+            if name == "daily_briefing"
+            else '_set_user_context(conn, str(user["id"]))'
+        )
+        assert expected_context in source, name
         if name in insert_routes:
             assert insert_routes[name] in source, name
             assert 'user["id"]' in source, name
