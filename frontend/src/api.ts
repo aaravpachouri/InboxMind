@@ -71,6 +71,17 @@ export type Briefing = {
   counts?: Record<string, number>;
   important_emails?: EmailSummary[];
   tasks_due_today_or_overdue?: TaskItem[];
+  sections?: {
+    priority_attention?: EmailSummary[];
+    unread_needing_action?: EmailSummary[];
+    other_actions?: EmailSummary[];
+  };
+  coverage?: {
+    emails_fetched?: number;
+    emails_analyzed?: number;
+    analysis_limit?: number;
+    truncated?: boolean;
+  };
   proposed_tasks?: Array<{
     title: string; description?: string; due_date?: string | null; priority?: 'low' | 'medium' | 'high' | 'urgent';
     confidence: number; evidence_quote: string; source_email_id: string; source_subject: string; from_address: string;
