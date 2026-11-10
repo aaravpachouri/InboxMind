@@ -125,3 +125,54 @@ def test_every_gmail_action_uses_the_authenticated_users_bridge():
             continue
         route_source = inspect.getsource(route)
         assert "_get_user_bridge(user)" in route_source, route_name
+
+
+
+def test_apps_script_bridge_url_and_secret_validation_reject_unsafe_values():
+    from fastapi import HTTPException
+
+    valid_url = "https://script.google.com/macros/s/AKfycbx12345678901234567890/exec"
+    assert public_app._validate_bridge_url(valid_url) == valid_url
+    assert public_app._validate_bridge_secret("a" * 43) == "a" * 43
+
+    invalid_urls = (
+        "http://script.google.com/macros/s/AKfycbx12345678901234567890/exec",
+        "https://example.com/macros/s/AKfycbx12345678901234567890/exec",
+        "https://script.google.com.evil.test/macros/s/AKfycbx12345678901234567890/exec",
+        "https://script.google.com/macros/s/short/exec",
+        "https://script.google.com/macros/s/AKfycbx12345678901234567890/exec?x=1",
+    )
+    for url in invalid_urls:
+        try:
+            public_app._validate_bridge_url(url)
+        except HTTPException as exc:
+            assert exc.status_code == 422
+        else:
+            raise AssertionError(f"Unsafe bridge URL was accepted: {url}")
+
+    for secret in ("short", "a" * 257, "a" * 32 + " "):
+        try:
+            public_app._validate_bridge_secret(secret)
+        except HTTPException as exc:
+            assert exc.status_code == 422
+        else:
+            raise AssertionError("Invalid bridge secret was accepted")
+
+
+def test_bridge_status_response_does_not_expose_deployment_or_secret():
+    source = inspect.getsource(public_app.apps_script_status)
+    returned = source.split("return {\"connected\": True", 1)[-1]
+    assert "bridge_url" not in returned
+    assert "bridge_secret" not in returned
+    assert '"email": email' in returned
+
+
+def test_bridge_connect_performs_profile_handshake_before_persisting():
+    source = inspect.getsource(public_app.connect_apps_script_bridge)
+    assert "_require_csrf(request, user)" in source
+    assert "_validate_bridge_url" in source
+    assert "_validate_bridge_secret" in source
+    assert '"profile"' in source
+    assert "await _bridge_request" in source
+    assert "UniqueViolation" in source
+    assert "already connected to another InboxMind account" in source
