@@ -17,6 +17,7 @@ def test_all_user_owned_persistent_tables_have_forced_rls_policies():
             "0002_apps_script_per_user_bridge.sql",
             "0003_user_memory_and_feedback.sql",
             "0004_local_ai_workers.sql",
+            "0007_unique_active_apps_script_deployments.sql",
         )
     )
     protected_tables = (
@@ -95,3 +96,32 @@ def test_draft_send_is_atomically_claimed_and_delete_requires_confirmation():
     assert "Confirm deleting this draft" in delete_source
     assert "status <> 'sending'" in delete_source
     assert "_require_csrf(request, user)" in delete_source
+
+def test_active_apps_script_deployment_url_cannot_be_shared_between_tenants():
+    source = (ROOT / "migrations" / "0007_unique_active_apps_script_deployments.sql").read_text(
+        encoding="utf-8"
+    )
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS user_apps_script_bridges_active_url_unique" in source
+    assert "ON user_apps_script_bridges (bridge_url)" in source
+    assert "WHERE revoked_at IS NULL" in source
+
+    connect_source = inspect.getsource(public_app.connect_apps_script_bridge)
+    assert "_current_user(session)" in connect_source
+    assert "_require_csrf(request, user)" in connect_source
+    assert "_set_user_context(conn, str(user[\"id\"]))" in connect_source
+    assert "bridge_url, encrypted_secret" in connect_source
+
+
+def test_every_gmail_action_uses_the_authenticated_users_bridge():
+    source = inspect.getsource(public_app._get_user_bridge)
+    assert "WHERE user_id=%s AND revoked_at IS NULL" in source
+    assert "(user[\"id\"],)" in source
+    assert "_set_user_context(conn, str(user[\"id\"]))" in source
+    assert "_fernet().decrypt" in source
+
+    for route_name in ("list_emails", "get_email", "archive_email", "trash_email"):
+        route = getattr(public_app, route_name, None)
+        if route is None:
+            continue
+        route_source = inspect.getsource(route)
+        assert "_get_user_bridge(user)" in route_source, route_name
