@@ -216,3 +216,16 @@ def test_daily_briefing_exposes_coverage_and_separate_action_sections() -> None:
     assert '"unread_needing_action"' in source
     assert '"emails_analyzed"' in source
     assert '"truncated"' in source
+
+
+def test_task_candidate_normalizes_whitespace_and_rejects_non_recipient_owner() -> None:
+    email = {"body_text": "Please send the signed proposal\nby Friday so we can proceed."}
+    candidate = {
+        "title": "Send the signed proposal",
+        "confidence": 0.9,
+        "evidence_quote": "Please send the signed proposal by Friday",
+        "owner": "recipient",
+    }
+    assert public_app._verified_task_candidate(candidate, email) is not None
+    assert public_app._verified_task_candidate({**candidate, "owner": "third_party"}, email) is None
+    assert public_app._verified_task_candidate({**candidate, "owner": "unclear"}, email) is None
