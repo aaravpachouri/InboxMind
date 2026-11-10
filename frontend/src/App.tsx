@@ -1888,6 +1888,26 @@ function AccountAccess({ checking = false, onAuthenticated }: {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
+  const resendVerification = async () => {
+    if (!email.trim()) {
+      setError('Enter the email address you used to create your account first.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await api<{ message: string }>('/auth/verification/resend', {
+        method: 'POST', body: JSON.stringify({ email }),
+      });
+      setNotice(result.message || 'If an unverified account exists, a new verification link will be sent.');
+    } catch (requestError) {
+      setError(errorText(requestError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setError('');
@@ -1978,6 +1998,7 @@ function AccountAccess({ checking = false, onAuthenticated }: {
       <div className="auth-links">
         {mode === 'login' && <><button type="button" onClick={() => { setMode('signup'); setError(''); setNotice(''); }}>Create an account</button><button type="button" onClick={() => { setMode('forgot'); setError(''); setNotice(''); }}>Forgot password?</button></>}
         {mode === 'signup' && <button type="button" onClick={() => { setMode('login'); setError(''); setNotice(''); }}>Already have an account? Sign in</button>}
+        {mode === 'verify' && <button type="button" disabled={busy} onClick={() => void resendVerification()}>Resend verification email</button>}
         {mode === 'forgot' && <button type="button" onClick={() => { setMode('login'); setError(''); setNotice(''); }}>Back to sign in</button>}
         {(mode === 'verify' || mode === 'reset') && <button type="button" onClick={() => { setMode('login'); setToken(''); setError(''); setNotice(''); window.history.replaceState({}, '', '/'); }}>Back to sign in</button>}
       </div>
