@@ -105,3 +105,86 @@ def test_postgres_rls_isolates_two_users_and_rejects_cross_tenant_writes():
                         "INSERT INTO user_feedback(user_id,feedback_text) VALUES (%s,'no context')",
                         (user_a,),
                     )
+
+def test_postgres_ai_worker_jobs_are_isolated_and_bound_to_the_leasing_worker():
+    # Exercise the exact job ownership guarantees used by claim/complete routes.
+    # Worker tokens are not stored in plaintext; this test uses opaque hashes.
+    with psycopg.connect(DATABASE_URL) as conn:
+        with conn.transaction():
+            suffix = uuid.uuid4().hex
+            user_a = conn.execute(
+                """INSERT INTO app_users(google_sub,email,display_name)
+                   VALUES (%s,%s,'Worker Tenant A') RETURNING id""",
+                (f"worker-a-{suffix}", f"worker-a-{suffix}@example.test"),
+            ).fetchone()[0]
+            user_b = conn.execute(
+                """INSERT INTO app_users(google_sub,email,display_name)
+                   VALUES (%s,%s,'Worker Tenant B') RETURNING id""",
+                (f"worker-b-{suffix}", f"worker-b-{suffix}@example.test"),
+            ).fetchone()[0]
+
+            worker_a = conn.execute(
+                """INSERT INTO user_ai_workers(user_id,token_hash,device_name)
+                   VALUES (%s,%s,'A PC') RETURNING id""",
+                (user_a, b"hash-a-" + suffix.encode()),
+            ).fetchone()[0]
+            worker_b = conn.execute(
+                """INSERT INTO user_ai_workers(user_id,token_hash,device_name)
+                   VALUES (%s,%s,'B PC') RETURNING id""",
+                (user_b, b"hash-b-" + suffix.encode()),
+            ).fetchone()[0]
+
+            _set_tenant(conn, str(user_a))
+            job_a = conn.execute(
+                """INSERT INTO user_ai_jobs(user_id,job_type,payload,status)
+                   VALUES (%s,'chat',%s,'queued') RETURNING id""",
+                (user_a, b"encrypted-a"),
+            ).fetchone()[0]
+            _set_tenant(conn, str(user_b))
+            job_b = conn.execute(
+                """INSERT INTO user_ai_jobs(user_id,job_type,payload,status)
+                   VALUES (%s,'chat',%s,'queued') RETURNING id""",
+                (user_b, b"encrypted-b"),
+            ).fetchone()[0]
+
+            # Worker A sees and leases only A's job, even when querying broadly.
+            _set_tenant(conn, str(user_a))
+            visible = conn.execute(
+                "SELECT id,user_id FROM user_ai_jobs WHERE status='queued'"
+            ).fetchall()
+            assert [row[0] for row in visible] == [job_a]
+            leased = conn.execute(
+                """UPDATE user_ai_jobs SET status='leased',worker_id=%s,
+                          lease_until=now()+interval '2 minutes'
+                   WHERE id=%s AND user_id=%s AND status='queued'
+                   RETURNING id""",
+                (worker_a, job_a, user_a),
+            ).fetchone()
+            assert leased[0] == job_a
+
+            # Cross-tenant claim/update is invisible and cannot mutate B's job.
+            forged_claim = conn.execute(
+                """UPDATE user_ai_jobs SET status='leased',worker_id=%s
+                   WHERE id=%s AND user_id=%s RETURNING id""",
+                (worker_a, job_b, user_b),
+            ).fetchall()
+            assert forged_claim == []
+            assert conn.execute(
+                "SELECT status FROM user_ai_jobs WHERE id=%s", (job_b,)
+            ).fetchall() == []
+
+            # Even within A, a different worker cannot complete the leased job.
+            wrong_worker = conn.execute(
+                """UPDATE user_ai_jobs SET status='completed',result=%s
+                   WHERE id=%s AND user_id=%s AND worker_id=%s AND status='leased'
+                   RETURNING id""",
+                (b"forged-result", job_a, user_a, worker_b),
+            ).fetchall()
+            assert wrong_worker == []
+            correct_worker = conn.execute(
+                """UPDATE user_ai_jobs SET status='completed',result=%s
+                   WHERE id=%s AND user_id=%s AND worker_id=%s AND status='leased'
+                   RETURNING id""",
+                (b"valid-result", job_a, user_a, worker_a),
+            ).fetchone()
+            assert correct_worker[0] == job_a
