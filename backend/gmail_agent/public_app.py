@@ -1577,23 +1577,45 @@ async def send_draft(
     if not body.confirm_send:
         raise HTTPException(400, "Explicitly confirm sending this email.")
     pool = _pool_or_503()
+    # Atomically claim the draft before contacting Gmail. Concurrent requests
+    # cannot both transition the same row from draft to sending.
     with pool.connection() as conn, conn.transaction():
         _set_user_context(conn, str(user["id"]))
         row = conn.execute(
-            "SELECT id,payload,status,gmail_draft_id FROM user_drafts WHERE user_id=%s AND id=%s",
+            """UPDATE user_drafts SET status='sending',updated_at=now()
+               WHERE user_id=%s AND id=%s AND status='draft' AND gmail_draft_id IS NOT NULL
+               RETURNING id,payload,status,gmail_draft_id,created_at,updated_at""",
             (user["id"], draft_id),
         ).fetchone()
     if not row:
-        raise HTTPException(404, "Draft not found.")
-    if row["status"] != "draft":
-        raise HTTPException(409, "Only a draft can be sent.")
-    if not row.get("gmail_draft_id"):
-        raise HTTPException(409, "This item has no verified Gmail draft ID and cannot be sent.")
-    bridge = _get_user_bridge(user)
-    result = await _bridge_request(
-        bridge["bridge_url"], bridge["bridge_secret"], "send_draft",
-        {"draft_id": row["gmail_draft_id"], "confirmed": True},
-    )
+        with pool.connection() as conn, conn.transaction():
+            _set_user_context(conn, str(user["id"]))
+            exists = conn.execute(
+                "SELECT status,gmail_draft_id FROM user_drafts WHERE user_id=%s AND id=%s",
+                (user["id"], draft_id),
+            ).fetchone()
+        if not exists:
+            raise HTTPException(404, "Draft not found.")
+        if not exists.get("gmail_draft_id"):
+            raise HTTPException(409, "This item has no verified Gmail draft ID and cannot be sent.")
+        raise HTTPException(409, "This draft is already being sent or is no longer sendable.")
+    try:
+        bridge = _get_user_bridge(user)
+        result = await _bridge_request(
+            bridge["bridge_url"], bridge["bridge_secret"], "send_draft",
+            {"draft_id": row["gmail_draft_id"], "confirmed": True},
+        )
+    except Exception:
+        # Restore only our still-claimed row. A network timeout can be ambiguous:
+        # the caller must check Gmail before retrying if the bridge may have sent.
+        with pool.connection() as conn, conn.transaction():
+            _set_user_context(conn, str(user["id"]))
+            conn.execute(
+                """UPDATE user_drafts SET status='draft',updated_at=now()
+                   WHERE user_id=%s AND id=%s AND status='sending'""",
+                (user["id"], draft_id),
+            )
+        raise
     payload = row.get("payload") or {}
     if isinstance(payload, str):
         payload = json.loads(payload)
@@ -1602,21 +1624,26 @@ async def send_draft(
         _set_user_context(conn, str(user["id"]))
         updated = conn.execute(
             """UPDATE user_drafts SET status='sent',payload=%s::jsonb,updated_at=now()
-               WHERE user_id=%s AND id=%s
+               WHERE user_id=%s AND id=%s AND status='sending'
                RETURNING id,payload,status,gmail_draft_id,created_at,updated_at""",
             (json.dumps(payload), user["id"], draft_id),
         ).fetchone()
+    if not updated:
+        raise HTTPException(409, "Gmail accepted the send, but the local draft status needs reconciliation.")
     return {"ok": True, "draft": _draft_from_row(updated), "gmail_result": result}
 
 
 @app.delete("/api/v1/drafts/{draft_id}")
 async def delete_draft(
     draft_id: str,
+    body: EmailActionRequest,
     request: Request,
     session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> dict[str, bool]:
     user = _current_user(session)
     _require_csrf(request, user)
+    if not body.confirm:
+        raise HTTPException(400, "Confirm deleting this draft before continuing.")
     pool = _pool_or_503()
     with pool.connection() as conn, conn.transaction():
         _set_user_context(conn, str(user["id"]))
@@ -1626,6 +1653,8 @@ async def delete_draft(
         ).fetchone()
     if not row:
         raise HTTPException(404, "Draft not found.")
+    if row.get("status") == "sending":
+        raise HTTPException(409, "This draft is currently being sent and cannot be deleted.")
     if row.get("gmail_draft_id") and row.get("status") == "draft":
         bridge = _get_user_bridge(user)
         await _bridge_request(
@@ -1634,7 +1663,12 @@ async def delete_draft(
         )
     with pool.connection() as conn, conn.transaction():
         _set_user_context(conn, str(user["id"]))
-        conn.execute("DELETE FROM user_drafts WHERE user_id=%s AND id=%s", (user["id"], draft_id))
+        deleted = conn.execute(
+            "DELETE FROM user_drafts WHERE user_id=%s AND id=%s AND status <> 'sending'",
+            (user["id"], draft_id),
+        )
+    if deleted.rowcount == 0:
+        raise HTTPException(409, "Draft changed while deletion was in progress. Refresh and retry.")
     return {"ok": True}
 
 
