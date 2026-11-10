@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
-import httpx
 
 from gmail_agent import auth_email
 
 
-def test_auth_email_requires_explicit_free_or_paid_provider_configuration(monkeypatch):
+def test_auth_email_requires_explicit_provider_configuration(monkeypatch):
     monkeypatch.delenv("RESEND_API_KEY", raising=False)
     monkeypatch.setenv("INBOXMIND_AUTH_EMAIL_FROM", "InboxMind <auth@example.com>")
     monkeypatch.setenv("FRONTEND_URL", "https://example.com")
@@ -22,8 +23,7 @@ def test_auth_email_requires_https_frontend(monkeypatch):
         auth_email._auth_email_config()
 
 
-@pytest.mark.asyncio
-async def test_account_email_sends_one_time_link_without_logging_token(monkeypatch):
+def test_account_email_sends_one_time_link(monkeypatch):
     monkeypatch.setenv("RESEND_API_KEY", "test-key")
     monkeypatch.setenv("INBOXMIND_AUTH_EMAIL_FROM", "InboxMind <auth@example.com>")
     monkeypatch.setenv("FRONTEND_URL", "https://example.com")
@@ -48,18 +48,17 @@ async def test_account_email_sends_one_time_link_without_logging_token(monkeypat
             return FakeResponse()
 
     monkeypatch.setattr(auth_email.httpx, "AsyncClient", FakeClient)
-    await auth_email.send_account_action_email(
+    asyncio.run(auth_email.send_account_action_email(
         "person@example.com", purpose="verify-email", token="one-time-token-123456789"
-    )
+    ))
     assert captured["url"] == auth_email.RESEND_API_URL
     assert captured["headers"]["Authorization"] == "Bearer test-key"
     assert captured["payload"]["to"] == ["person@example.com"]
     assert "one-time-token-123456789" in captured["payload"]["text"]
 
 
-@pytest.mark.asyncio
-async def test_unknown_email_purpose_is_rejected_before_delivery():
+def test_unknown_email_purpose_is_rejected_before_delivery():
     with pytest.raises(ValueError):
-        await auth_email.send_account_action_email(
+        asyncio.run(auth_email.send_account_action_email(
             "person@example.com", purpose="other", token="one-time-token-123456789"
-        )
+        ))
