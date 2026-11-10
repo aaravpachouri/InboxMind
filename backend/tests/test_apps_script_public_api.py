@@ -229,3 +229,21 @@ def test_task_candidate_normalizes_whitespace_and_rejects_non_recipient_owner() 
     assert public_app._verified_task_candidate(candidate, email) is not None
     assert public_app._verified_task_candidate({**candidate, "owner": "third_party"}, email) is None
     assert public_app._verified_task_candidate({**candidate, "owner": "unclear"}, email) is None
+
+
+
+def test_legacy_apps_script_login_cannot_create_or_switch_inboxmind_identity():
+    source = inspect.getsource(public_app.apps_script_login)
+    signature = inspect.signature(public_app.apps_script_login)
+    assert "session" in signature.parameters
+    assert "_current_user(session)" in source
+    assert "_require_csrf(request, user)" in source
+    assert "INSERT INTO app_users" not in source
+    assert "INSERT INTO user_apps_script_bridges" in source
+
+
+def test_google_login_refuses_implicit_email_based_account_linking():
+    source = inspect.getsource(public_app.google_callback)
+    assert "lower(email)=lower(%s) AND google_sub<>%s" in source
+    assert "automatic account linking is disabled" in source
+    assert "ON CONFLICT(google_sub)" in source
