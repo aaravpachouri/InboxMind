@@ -455,17 +455,20 @@ async def apps_script_login(
         raise HTTPException(502, "Apps Script did not return a valid mailbox identity.")
     encrypted_secret = _fernet().encrypt(bridge_secret.encode())
     pool = _pool_or_503()
-    with pool.connection() as conn, conn.transaction():
-        _set_user_context(conn, str(user["id"]))
-        conn.execute(
-            """INSERT INTO user_apps_script_bridges
-                 (user_id,google_account_email,bridge_url,bridge_secret_ciphertext,updated_at,revoked_at)
-               VALUES (%s,%s,%s,%s,now(),NULL)
-               ON CONFLICT(user_id,google_account_email) DO UPDATE SET
-                 bridge_url=EXCLUDED.bridge_url,bridge_secret_ciphertext=EXCLUDED.bridge_secret_ciphertext,
-                 updated_at=now(),revoked_at=NULL""",
-            (user["id"], email, bridge_url, encrypted_secret),
-        )
+    try:
+        with pool.connection() as conn, conn.transaction():
+            _set_user_context(conn, str(user["id"]))
+            conn.execute(
+                """INSERT INTO user_apps_script_bridges
+                     (user_id,google_account_email,bridge_url,bridge_secret_ciphertext,updated_at,revoked_at)
+                   VALUES (%s,%s,%s,%s,now(),NULL)
+                   ON CONFLICT(user_id,google_account_email) DO UPDATE SET
+                     bridge_url=EXCLUDED.bridge_url,bridge_secret_ciphertext=EXCLUDED.bridge_secret_ciphertext,
+                     updated_at=now(),revoked_at=NULL""",
+                (user["id"], email, bridge_url, encrypted_secret),
+            )
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(409, "This Apps Script deployment is already connected to another InboxMind account. Deploy a separate copy for each mailbox.") from None
     return {"connected": True, "email": email,
             "message": "Mailbox connected to your signed-in InboxMind account."}
 
