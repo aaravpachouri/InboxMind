@@ -610,7 +610,7 @@ def logout(request: Request, response: Response,
 
 def _validate_bridge_url(value: str) -> str:
     parsed = urlparse(value)
-    deployment_path = re.fullmatch(r"/macros/s/[A-Za-z0-9_-]{20,200}/exec", parsed.path or "")
+    deployment_path = re.fullmatch(r"/macros/s/[A-Za-z0-9_-]{1,200}/exec", parsed.path or "")
     if (parsed.scheme != "https" or parsed.hostname != "script.google.com"
             or parsed.port not in (None, 443) or not deployment_path
             or parsed.query or parsed.fragment or parsed.username or parsed.password):
