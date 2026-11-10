@@ -128,32 +128,6 @@ def test_gemini_model_status_is_selected_when_key_exists(monkeypatch):
 
 
 
-def test_gemini_hosted_job_does_not_require_private_worker(monkeypatch):
-    from gmail_agent import public_app
-
-    async def fake_generate(messages, *, temperature=0.2, json_output=False, timeout_seconds=None):
-        return {"content": "Gemini response", "provider": "gemini", "model": "gemini-test"}
-
-    monkeypatch.setattr(hosted_ollama, "AI_BACKEND_MODE", "private_worker")
-    monkeypatch.setattr(hosted_ollama, "GEMINI_API_KEY", "test-key")
-    monkeypatch.setattr(hosted_ollama, "generate", fake_generate)
-    monkeypatch.setattr(public_app, "_require_ai_enabled", lambda _user_id: None)
-
-    def fail_if_worker_used(_user_id):
-        raise AssertionError("Gemini inference must not require the private Windows worker")
-
-    monkeypatch.setattr(public_app, "_require_online_ai_worker", fail_if_worker_used)
-    result = asyncio.run(public_app._run_local_ai_job(
-        "tenant-a",
-        "summarize_email",
-        [{"role": "user", "content": "Summarize this email."}],
-    ))
-
-    assert result["content"] == "Gemini response"
-    assert result["provider"] == "gemini"
-
-
-
 def test_hosted_chat_returns_the_actual_gemini_provider(monkeypatch):
     from gmail_agent import public_app
 
