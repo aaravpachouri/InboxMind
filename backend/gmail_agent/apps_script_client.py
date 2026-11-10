@@ -101,7 +101,7 @@ class AppsScriptGmailClient:
     def list_emails(self, query: str = "", max_results: int = 50, page_token: str | None = None) -> dict[str, Any]:
         return self._call("list_emails", {
             "query": query,
-            "max_results": max(1, min(int(max_results), 50)),
+            "max_results": max(1, min(int(max_results), 10)),
             "page_token": page_token or "0",
         })
 
