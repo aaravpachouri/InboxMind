@@ -313,9 +313,41 @@ def verify_email(body: EmailTokenRequest) -> dict[str, Any]:
     return {"ok": True, "verified": True, "message": "Email verified. You can now sign in."}
 
 
+def _login_rate_limit_key(email: str) -> bytes:
+    return _hash(email)
+
+
+def _check_login_rate_limit(email: str) -> None:
+    key = _login_rate_limit_key(email)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(encode(%s,'hex'), 0))", (key,))
+        attempts = conn.execute(
+            "SELECT count(*) AS total FROM auth_login_attempts WHERE email_hash=%s AND created_at > now()-interval '15 minutes'",
+            (key,),
+        ).fetchone()
+        if int(attempts["total"]) >= 10:
+            raise HTTPException(429, "Too many sign-in attempts. Wait 15 minutes before trying again.")
+
+
+def _record_failed_login(email: str) -> None:
+    key = _login_rate_limit_key(email)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(encode(%s,'hex'), 0))", (key,))
+        conn.execute("INSERT INTO auth_login_attempts(email_hash) VALUES (%s)", (key,))
+
+
+def _clear_failed_logins(email: str) -> None:
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        conn.execute("DELETE FROM auth_login_attempts WHERE email_hash=%s", (_login_rate_limit_key(email),))
+
+
 @app.post("/api/v1/auth/login")
 def email_login(body: EmailLoginRequest, response: Response) -> dict[str, Any]:
     email = _normalized_email(body.email)
+    _check_login_rate_limit(email)
     pool = _pool_or_503()
     with pool.connection() as conn:
         users = conn.execute(
@@ -323,10 +355,13 @@ def email_login(body: EmailLoginRequest, response: Response) -> dict[str, Any]:
                FROM app_users WHERE lower(email)=%s ORDER BY created_at LIMIT 2""", (email,),
         ).fetchall()
     if len(users) != 1 or not users[0].get("password_hash"):
+        _record_failed_login(email)
         raise HTTPException(401, "Email or password is incorrect.")
     user = users[0]
     if not auth_security.verify_password(body.password, user["password_hash"]):
+        _record_failed_login(email)
         raise HTTPException(401, "Email or password is incorrect.")
+    _clear_failed_logins(email)
     if not user["email_verified"]:
         raise HTTPException(403, "Verify your email address before signing in.")
     csrf, session_token = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
