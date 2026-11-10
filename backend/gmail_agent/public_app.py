@@ -1470,7 +1470,7 @@ def _verified_task_candidate(candidate: dict[str, Any], email: dict[str, Any], i
     normalized_quote = re.sub(r"\s+", " ", quote).casefold()
     if not title or len(quote) < 12 or normalized_quote not in normalized_source:
         return None
-    owner = str(candidate.get("owner") or "unclear").strip().casefold()
+    owner = str(candidate.get("owner") or "recipient").strip().casefold()
     if owner not in {"recipient", "me", "user"}:
         return None
     confidence = candidate.get("confidence")
