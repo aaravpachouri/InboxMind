@@ -150,7 +150,7 @@ def test_worker_claim_is_limited_to_its_owner_and_uses_safe_leases() -> None:
     assert "status='queued' OR (status='leased' AND lease_until < now())" in source
     assert "FOR UPDATE SKIP LOCKED" in source
     assert "WHERE id=%s AND user_id=%s" in source
-    assert "worker[\\"user_id\\"]" in source
+    assert 'worker["user_id"]' in source
 
 
 def test_worker_completion_requires_job_owner_worker_and_active_lease() -> None:
