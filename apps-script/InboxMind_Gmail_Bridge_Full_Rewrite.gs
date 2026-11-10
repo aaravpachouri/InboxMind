@@ -114,7 +114,7 @@ function dispatchAction_(action, p) {
 function requiredString_(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new Error("Missing required field: " + name);
   const clean = value.trim();
-  if (clean.length > 2048 || /[\\u0000-\\u001f\\u007f]/.test(clean)) throw new Error("Invalid field: " + name);
+  if (clean.length > 2048 || /[\u0000-\u001f\u007f]/.test(clean)) throw new Error("Invalid field: " + name);
   if (name === "message_id" || name === "thread_id" || name === "draft_id" || name === "attachment_id") {
     if (!/^[A-Za-z0-9_-]{1,256}$/.test(clean)) throw new Error("Invalid field: " + name);
   }
@@ -469,8 +469,8 @@ function recipientString_(value) {
   const recipients = Array.isArray(value) ? value : (value ? [value] : []);
   if (recipients.length > 50) throw new Error("Too many recipients");
   return recipients.map(function (item) {
-    const address = boundedText_(item, "recipient", 320, false).replace(/[\\r\\n\\x00-\\x1f\\x7f]/g, "").trim();
-    if (!/^[^\\s@,;<>]+@[^\\s@,;<>]+\\.[^\\s@,;<>]+$/.test(address)) throw new Error("Invalid recipient address");
+    const address = boundedText_(item, "recipient", 320, false).replace(/[\r\n\x00-\x1f\x7f]/g, "").trim();
+    if (!/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(address)) throw new Error("Invalid recipient address");
     return address;
   }).join(", ");
 }
@@ -607,7 +607,7 @@ function createCalendarEvent_(p) {
   const attendees = boundedStringArray_(p.attendees, "attendees", 50, 320);
   if (attendees.length) {
     event.attendees = attendees.map(function (email) {
-      if (!/^[^\\s@,;<>]+@[^\\s@,;<>]+\\.[^\\s@,;<>]+$/.test(email)) throw new Error("Invalid attendee email");
+      if (!/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/.test(email)) throw new Error("Invalid attendee email");
       return { email: email };
     });
   }
