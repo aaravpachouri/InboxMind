@@ -143,3 +143,44 @@ def test_windows_worker_sends_heartbeat_on_a_separate_thread_during_inference() 
     assert 'name="inboxmind-heartbeat"' in source
     assert "stop_event.wait(HEARTBEAT_SECONDS)" in source
     assert "InboxMind heartbeat confirmed" in source
+
+def test_worker_claim_is_limited_to_its_owner_and_uses_safe_leases() -> None:
+    source = inspect.getsource(public_app.claim_ai_worker_job)
+    assert "WHERE user_id=%s AND attempts < 3" in source
+    assert "status='queued' OR (status='leased' AND lease_until < now())" in source
+    assert "FOR UPDATE SKIP LOCKED" in source
+    assert "WHERE id=%s AND user_id=%s" in source
+    assert "worker[\\"user_id\\"]" in source
+
+
+def test_worker_completion_requires_job_owner_worker_and_active_lease() -> None:
+    source = inspect.getsource(public_app.complete_ai_worker_job)
+    assert "WHERE id=%s AND user_id=%s AND worker_id=%s AND status='leased'" in source
+    assert 'worker["user_id"]' in source
+    assert 'worker["id"]' in source
+    assert "if not row" in source
+    assert "HTTPException(409" in source
+
+
+def test_worker_heartbeat_cannot_update_another_or_revoked_worker() -> None:
+    source = inspect.getsource(public_app.ai_worker_heartbeat)
+    assert "WHERE id=%s AND user_id=%s AND revoked_at IS NULL" in source
+    assert '_set_user_context(conn, str(worker["user_id"]))' in source
+
+
+def test_worker_registration_and_revocation_require_signed_in_csrf_session() -> None:
+    register = inspect.getsource(public_app.register_ai_worker)
+    revoke = inspect.getsource(public_app.revoke_ai_worker)
+    for source in (register, revoke):
+        assert "_current_user(session)" in source
+        assert "_require_csrf(request, user)" in source
+        assert '_set_user_context(conn, str(user["id"]))' in source
+    assert "UPDATE user_ai_workers SET revoked_at=now()" in revoke
+    assert "WHERE user_id=%s AND status IN ('queued','leased')" in revoke
+
+
+def test_worker_token_lookup_uses_only_hash_and_rejects_revoked_tokens() -> None:
+    source = inspect.getsource(public_app._current_ai_worker)
+    assert "token_hash=%s AND revoked_at IS NULL" in source
+    assert "_hash(token)" in source
+    assert "token_hash" not in source.split("SELECT", 1)[-1].split("FROM", 1)[0]
