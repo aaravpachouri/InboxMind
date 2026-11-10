@@ -47,7 +47,11 @@ def test_private_database_routes_set_transaction_local_tenant_context():
     for name in route_names:
         source = inspect.getsource(getattr(public_app, name))
         assert "_set_user_context(conn, str(user[\"id\"]))" in source, name
-        assert "user_id=%s" in source, name
+        if name == "create_draft":
+            assert "INSERT INTO user_drafts(user_id" in source
+            assert 'user["id"]' in source
+        else:
+            assert "user_id=%s" in source, name
 
 
 def test_admin_overview_is_server_guarded_and_only_returns_aggregates():
