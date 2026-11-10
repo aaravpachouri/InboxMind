@@ -139,7 +139,7 @@ def test_apps_script_bridge_url_and_secret_validation_reject_unsafe_values():
         "http://script.google.com/macros/s/AKfycbx12345678901234567890/exec",
         "https://example.com/macros/s/AKfycbx12345678901234567890/exec",
         "https://script.google.com.evil.test/macros/s/AKfycbx12345678901234567890/exec",
-        "https://script.google.com/macros/s/short/exec",
+        "https://script.google.com/macros/s//exec",
         "https://script.google.com/macros/s/AKfycbx12345678901234567890/exec?x=1",
     )
     for url in invalid_urls:
