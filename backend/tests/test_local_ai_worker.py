@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ast
 import inspect
 from datetime import datetime, timedelta, timezone
@@ -184,3 +185,28 @@ def test_worker_token_lookup_uses_only_hash_and_rejects_revoked_tokens() -> None
     assert "token_hash=%s AND revoked_at IS NULL" in source
     assert "_hash(token)" in source
     assert "token_hash" not in source.split("SELECT", 1)[-1].split("FROM", 1)[0]
+
+
+def test_private_worker_mode_never_falls_back_to_a_configured_cloud_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(public_app.hosted_ollama, "AI_BACKEND_MODE", "private_worker")
+    # Simulate a configured Gemini key: provider presence must not override mode.
+    monkeypatch.setattr(public_app.hosted_ollama, "active_provider", lambda: "gemini")
+    monkeypatch.setattr(public_app, "_require_ai_enabled", lambda _user_id: None)
+
+    def worker_unavailable(_user_id: str) -> None:
+        raise HTTPException(503, "Private worker unavailable.")
+
+    monkeypatch.setattr(public_app, "_require_online_ai_worker", worker_unavailable)
+
+    async def forbidden_cloud_call(*_args: object, **_kwargs: object) -> dict[str, str]:
+        pytest.fail("private_worker mode attempted a cloud-provider request")
+
+    monkeypatch.setattr(public_app.hosted_ollama, "generate", forbidden_cloud_call)
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(public_app._run_local_ai_job(
+            "user-1", "chat", [{"role": "user", "content": "private message"}]
+        ))
+    assert error.value.status_code == 503
+    assert error.value.detail == "Private worker unavailable."
