@@ -448,11 +448,12 @@ async def apps_script_login(
     user = _current_user(session)
     _require_csrf(request, user)
     bridge_url = _validate_bridge_url(body.bridge_url.strip())
-    profile = await _bridge_request(bridge_url, body.bridge_secret, "profile")
+    bridge_secret = _validate_bridge_secret(body.bridge_secret)
+    profile = await _bridge_request(bridge_url, bridge_secret, "profile")
     email = str(profile.get("email", "")).strip().lower() if isinstance(profile, dict) else ""
     if not email or "@" not in email:
         raise HTTPException(502, "Apps Script did not return a valid mailbox identity.")
-    encrypted_secret = _fernet().encrypt(body.bridge_secret.encode())
+    encrypted_secret = _fernet().encrypt(bridge_secret.encode())
     pool = _pool_or_503()
     with pool.connection() as conn, conn.transaction():
         _set_user_context(conn, str(user["id"]))
@@ -606,19 +607,34 @@ def logout(request: Request, response: Response,
 
 def _validate_bridge_url(value: str) -> str:
     parsed = urlparse(value)
+    deployment_path = re.fullmatch(r"/macros/s/[A-Za-z0-9_-]{20,200}/exec", parsed.path or "")
     if (parsed.scheme != "https" or parsed.hostname != "script.google.com"
-            or not parsed.path.startswith("/macros/s/") or not parsed.path.endswith("/exec")
+            or parsed.port not in (None, 443) or not deployment_path
             or parsed.query or parsed.fragment or parsed.username or parsed.password):
         raise HTTPException(422, "Use the HTTPS Apps Script web-app /exec URL from your own deployment.")
     return value
 
 
+def _validate_bridge_secret(value: str) -> str:
+    if not 32 <= len(value) <= 256 or not re.fullmatch(r"[A-Za-z0-9._~-]+", value):
+        raise HTTPException(422, "Bridge secret must be a 32–256 character URL-safe secret.")
+    return value
+
+
 async def _bridge_request(url: str, secret: str, action: str, params: dict[str, Any] | None = None) -> Any:
     try:
-        async with httpx.AsyncClient(timeout=35, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=35, follow_redirects=True, max_redirects=3) as client:
             response = await client.post(url, json={"secret": secret, "action": action, "params": params or {}})
+        # Apps Script may redirect to its Googleusercontent execution host. Never
+        # forward the bridge secret to an arbitrary redirect destination.
+        if response.url.scheme != "https" or response.url.host not in {
+            "script.google.com", "script.googleusercontent.com"
+        }:
+            raise HTTPException(502, "Apps Script redirected to an untrusted host. Check your deployment.")
         response.raise_for_status()
         payload = response.json()
+    except HTTPException:
+        raise
     except (httpx.HTTPError, ValueError):
         raise HTTPException(502, "Apps Script bridge could not be reached. Check the deployment URL and access settings.") from None
     if not isinstance(payload, dict) or payload.get("ok") is not True:
@@ -664,18 +680,21 @@ async def connect_apps_script_bridge(
         raise HTTPException(502, "Bridge did not return a verified Gmail profile.")
     pool = _pool_or_503()
     encrypted_secret = _fernet().encrypt(body.bridge_secret.encode())
-    with pool.connection() as conn, conn.transaction():
-        _set_user_context(conn, str(user["id"]))
-        conn.execute(
-            """INSERT INTO user_apps_script_bridges
-                 (user_id, google_account_email, bridge_url, bridge_secret_ciphertext, updated_at, revoked_at)
-               VALUES (%s,%s,%s,%s,now(),NULL)
-               ON CONFLICT(user_id, google_account_email) DO UPDATE SET
-                 bridge_url=EXCLUDED.bridge_url,
-                 bridge_secret_ciphertext=EXCLUDED.bridge_secret_ciphertext,
-                 updated_at=now(), revoked_at=NULL""",
-            (user["id"], email, bridge_url, encrypted_secret),
-        )
+    try:
+        with pool.connection() as conn, conn.transaction():
+            _set_user_context(conn, str(user["id"]))
+            conn.execute(
+                """INSERT INTO user_apps_script_bridges
+                     (user_id, google_account_email, bridge_url, bridge_secret_ciphertext, updated_at, revoked_at)
+                   VALUES (%s,%s,%s,%s,now(),NULL)
+                   ON CONFLICT(user_id, google_account_email) DO UPDATE SET
+                     bridge_url=EXCLUDED.bridge_url,
+                     bridge_secret_ciphertext=EXCLUDED.bridge_secret_ciphertext,
+                     updated_at=now(), revoked_at=NULL""",
+                (user["id"], email, bridge_url, encrypted_secret),
+            )
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(409, "This Apps Script deployment is already connected to another InboxMind account. Deploy a separate copy for each mailbox.") from None
     return {"connected": True, "email": email, "message": "Personal Apps Script bridge connected."}
 
 
