@@ -1467,8 +1467,11 @@ def _verified_task_candidate(candidate: dict[str, Any], email: dict[str, Any], i
     quote = re.sub(r"\s+", " ", str(candidate.get("evidence_quote") or "")).strip()[:500]
     source_text = " ".join(str(email.get(key) or "") for key in ("body_text", "snippet"))
     normalized_source = re.sub(r"\s+", " ", source_text).casefold()
-    normalized_quote = re.sub(r"\\s+", " ", quote).casefold()
+    normalized_quote = re.sub(r"\s+", " ", quote).casefold()
     if not title or len(quote) < 12 or normalized_quote not in normalized_source:
+        return None
+    owner = str(candidate.get("owner") or "unclear").strip().casefold()
+    if owner not in {"recipient", "me", "user"}:
         return None
     confidence = candidate.get("confidence")
     if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or confidence < 0.75:
@@ -1492,7 +1495,7 @@ def _verified_task_candidate(candidate: dict[str, Any], email: dict[str, Any], i
         "priority": priority,
         "confidence": round(float(confidence), 2),
         "evidence_quote": quote,
-        "owner": str(candidate.get("owner") or "recipient").strip()[:80],
+        "owner": "recipient",
         "source_email_id": str((item or {}).get("id") or ""),
         "source_subject": str((item or {}).get("subject") or email.get("subject") or "(no subject)")[:300],
         "from_address": str((item or {}).get("from_address") or email.get("from_address") or "")[:300],
