@@ -96,6 +96,33 @@ def _current_user(session_cookie: str | None) -> dict[str, Any]:
     return row
 
 
+def _require_platform_admin(user: dict[str, Any]) -> None:
+    configured = {
+        item.strip().lower()
+        for item in os.getenv("PLATFORM_ADMIN_EMAILS", "").split(",")
+        if item.strip()
+    }
+    if not bool(user.get("is_platform_admin")) and str(user.get("email", "")).lower() not in configured:
+        raise HTTPException(403, "Platform administrator access is required.")
+
+
+@app.get("/api/v1/admin/overview")
+def platform_admin_overview(
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    _require_platform_admin(user)
+    pool = _pool_or_503()
+    with pool.connection() as conn:
+        counts = conn.execute(
+            """SELECT
+                 (SELECT count(*) FROM app_users) AS users,
+                 (SELECT count(*) FROM user_sessions WHERE revoked_at IS NULL AND expires_at>now()) AS active_sessions,
+                 (SELECT count(*) FROM user_apps_script_bridges WHERE revoked_at IS NULL) AS connected_mailboxes"""
+        ).fetchone()
+    return {"is_platform_admin": True, "counts": {key: int(value) for key, value in counts.items()}}
+
+
 def _require_csrf(request: Request, user: dict[str, Any]) -> None:
     token = request.headers.get("X-CSRF-Token", "")
     if not token or not secrets.compare_digest(_hash(token).hex(), user["csrf_hash"]):
