@@ -403,32 +403,23 @@ async def apps_script_login(
     body: BridgeConnectRequest,
     request: Request,
     response: Response,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> dict[str, Any]:
-    """Authenticate by possession of the user's own secret-protected Apps Script bridge.
+    """Legacy bridge-login endpoint, now safely requires an existing InboxMind account.
 
-    Gmail authorization remains inside that user's Apps Script deployment; this route
-    does not request Gmail OAuth scopes or accept a shared global bridge.
+    Possession of a mailbox bridge is not sufficient to create or authenticate an
+    InboxMind identity. Users must sign in first, then explicitly connect the mailbox.
     """
+    user = _current_user(session)
+    _require_csrf(request, user)
     bridge_url = _validate_bridge_url(body.bridge_url.strip())
     profile = await _bridge_request(bridge_url, body.bridge_secret, "profile")
     email = str(profile.get("email", "")).strip().lower() if isinstance(profile, dict) else ""
     if not email or "@" not in email:
         raise HTTPException(502, "Apps Script did not return a valid mailbox identity.")
-    _fernet()
-    pool = _pool_or_503()
-    account_key = "apps-script:" + email
-    csrf = secrets.token_urlsafe(32)
-    session_token = secrets.token_urlsafe(48)
-    expires = datetime.now(timezone.utc) + SESSION_TTL
     encrypted_secret = _fernet().encrypt(body.bridge_secret.encode())
+    pool = _pool_or_503()
     with pool.connection() as conn, conn.transaction():
-        user = conn.execute(
-            """INSERT INTO app_users(google_sub,email,email_verified,display_name,picture_url)
-               VALUES (%s,%s,true,%s,'')
-               ON CONFLICT(google_sub) DO UPDATE SET email=EXCLUDED.email,email_verified=true,updated_at=now()
-               RETURNING id,email,display_name,picture_url""",
-            (account_key, email, email.split("@")[0]),
-        ).fetchone()
         _set_user_context(conn, str(user["id"]))
         conn.execute(
             """INSERT INTO user_apps_script_bridges
@@ -439,15 +430,8 @@ async def apps_script_login(
                  updated_at=now(),revoked_at=NULL""",
             (user["id"], email, bridge_url, encrypted_secret),
         )
-        conn.execute(
-            "INSERT INTO user_sessions(user_id,session_token_hash,csrf_token_hash,expires_at) VALUES (%s,%s,%s,%s)",
-            (user["id"], _hash(session_token), _hash(csrf), expires),
-        )
-    response.set_cookie(SESSION_COOKIE, session_token, httponly=True, secure=True, samesite="lax",
-                        max_age=int(SESSION_TTL.total_seconds()), path="/")
-    response.set_cookie("inboxmind_csrf", csrf, httponly=False, secure=True, samesite="lax",
-                        max_age=int(SESSION_TTL.total_seconds()), path="/")
-    return {"connected": True, "email": email, "message": "Signed in using your personal Apps Script bridge."}
+    return {"connected": True, "email": email,
+            "message": "Mailbox connected to your signed-in InboxMind account."}
 
 
 @app.get("/api/v1/auth/google/login")
@@ -505,6 +489,21 @@ async def google_callback(code: str = "", state: str = "", error: str = "") -> R
     session_token = secrets.token_urlsafe(48)
     expires = datetime.now(timezone.utc) + SESSION_TTL
     with pool.connection() as conn, conn.transaction():
+        # Never merge identities merely because their email strings match. A password
+        # account or legacy Apps Script identity must be explicitly linked in a future
+        # verified account-linking flow.
+        collision = conn.execute(
+            """SELECT id FROM app_users
+               WHERE lower(email)=lower(%s) AND google_sub<>%s
+               LIMIT 1""",
+            (claims["email"], claims["sub"]),
+        ).fetchone()
+        if collision:
+            raise HTTPException(
+                409,
+                "An InboxMind account already uses this email with a different sign-in method. "
+                "Sign in to that account first; automatic account linking is disabled.",
+            )
         user = conn.execute(
             """INSERT INTO app_users(google_sub,email,email_verified,display_name,picture_url)
                VALUES (%s,%s,true,%s,%s)
