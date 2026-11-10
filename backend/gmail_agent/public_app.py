@@ -24,7 +24,7 @@ from google.auth.transport.requests import Request as GoogleRequest
 from google.oauth2 import id_token
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
-from gmail_agent import hosted_ollama
+from gmail_agent import hosted_ollama, auth_security, auth_email
 
 hosted_ollama.validate_configuration()
 
@@ -85,7 +85,7 @@ def _current_user(session_cookie: str | None) -> dict[str, Any]:
     pool = _pool_or_503()
     with pool.connection() as conn:
         row = conn.execute(
-            """SELECT u.id, u.google_sub, u.email, u.display_name, u.picture_url, s.id AS session_id,
+            """SELECT u.id, u.google_sub, u.email, u.display_name, u.picture_url, u.is_platform_admin, s.id AS session_id,
                       encode(s.csrf_token_hash, 'hex') AS csrf_hash
                FROM user_sessions s JOIN app_users u ON u.id=s.user_id
                WHERE s.session_token_hash=%s AND s.revoked_at IS NULL AND s.expires_at > now()""",
@@ -110,6 +110,210 @@ def health() -> dict[str, str]:
         conn.execute("SELECT 1")
     return {"status": "ok", "service": "inboxmind-secure-api"}
 
+
+
+class EmailSignupRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    password: str = Field(min_length=12, max_length=1024)
+    display_name: str = Field(default="", max_length=120)
+
+
+class EmailLoginRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class EmailTokenRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=256)
+
+
+class PasswordResetRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+
+
+class PasswordResetCompleteRequest(BaseModel):
+    token: str = Field(min_length=20, max_length=256)
+    password: str = Field(min_length=12, max_length=1024)
+
+
+def _normalized_email(value: str) -> str:
+    email = value.strip().lower()
+    if len(email) > 320 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        raise HTTPException(422, "Enter a valid email address.")
+    return email
+
+
+def _set_session_cookies(response: Response, session_token: str, csrf: str) -> None:
+    response.set_cookie(SESSION_COOKIE, session_token, httponly=True, secure=True, samesite="lax",
+                        max_age=int(SESSION_TTL.total_seconds()), path="/")
+    response.set_cookie("inboxmind_csrf", csrf, httponly=False, secure=True, samesite="lax",
+                        max_age=int(SESSION_TTL.total_seconds()), path="/")
+
+
+async def _issue_account_token(user_id: str, email: str, purpose: str) -> None:
+    raw_token, token_digest = auth_security.create_one_time_token()
+    expires = datetime.now(timezone.utc) + timedelta(minutes=30)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        conn.execute(
+            "UPDATE auth_token_issuance SET consumed_at=now() WHERE user_id=%s AND purpose=%s AND consumed_at IS NULL",
+            (user_id, purpose),
+        )
+        conn.execute(
+            "INSERT INTO auth_token_issuance(user_id,purpose,token_hash,expires_at) VALUES (%s,%s,%s,%s)",
+            (user_id, purpose, token_digest, expires),
+        )
+        if purpose == "verify_email":
+            conn.execute(
+                "UPDATE app_users SET email_verification_hash=%s,email_verification_expires_at=%s WHERE id=%s",
+                (token_digest, expires, user_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE app_users SET password_reset_hash=%s,password_reset_expires_at=%s WHERE id=%s",
+                (token_digest, expires, user_id),
+            )
+    try:
+        await auth_email.send_account_action_email(
+            email, purpose="verify-email" if purpose == "verify_email" else "reset-password",
+            token=raw_token,
+        )
+    except auth_email.AuthEmailDeliveryError:
+        with pool.connection() as conn, conn.transaction():
+            conn.execute(
+                "UPDATE auth_token_issuance SET consumed_at=now() WHERE token_hash=%s AND consumed_at IS NULL",
+                (token_digest,),
+            )
+            if purpose == "verify_email":
+                conn.execute("UPDATE app_users SET email_verification_hash=NULL,email_verification_expires_at=NULL WHERE id=%s", (user_id,))
+            else:
+                conn.execute("UPDATE app_users SET password_reset_hash=NULL,password_reset_expires_at=NULL WHERE id=%s", (user_id,))
+        raise HTTPException(503, "Account email delivery is unavailable. Please try again later.") from None
+
+
+@app.post("/api/v1/auth/signup")
+async def email_signup(body: EmailSignupRequest) -> dict[str, Any]:
+    email = _normalized_email(body.email)
+    password_hash = auth_security.hash_password(body.password)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        existing = conn.execute(
+            "SELECT id FROM app_users WHERE lower(email)=%s LIMIT 2", (email,)
+        ).fetchall()
+        if existing:
+            raise HTTPException(409, "An account already exists for this email. Sign in or use account recovery.")
+        user = conn.execute(
+            """INSERT INTO app_users(google_sub,email,email_verified,display_name,picture_url,password_hash)
+               VALUES (NULL,%s,false,%s,'',%s) RETURNING id""",
+            (email, body.display_name.strip()[:120] or email.split("@")[0], password_hash),
+        ).fetchone()
+    await _issue_account_token(str(user["id"]), email, "verify_email")
+    return {"ok": True, "verification_required": True,
+            "message": "Check your email for a verification link before signing in."}
+
+
+@app.post("/api/v1/auth/verify-email")
+def verify_email(body: EmailTokenRequest) -> dict[str, Any]:
+    try:
+        digest = auth_security.hash_one_time_token(body.token)
+    except ValueError:
+        raise HTTPException(400, "Verification link is invalid or expired.") from None
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        token = conn.execute(
+            """UPDATE auth_token_issuance SET consumed_at=now()
+               WHERE token_hash=%s AND purpose='verify_email' AND consumed_at IS NULL AND expires_at>now()
+               RETURNING user_id""", (digest,),
+        ).fetchone()
+        if not token:
+            raise HTTPException(400, "Verification link is invalid, expired or already used.")
+        user = conn.execute(
+            """UPDATE app_users SET email_verified=true,email_verified_at=now(),
+                      email_verification_hash=NULL,email_verification_expires_at=NULL,updated_at=now()
+               WHERE id=%s RETURNING id""", (token["user_id"],),
+        ).fetchone()
+        if not user:
+            raise HTTPException(400, "Verification link is invalid or expired.")
+        conn.execute(
+            "INSERT INTO auth_email_events(user_id,event_type) VALUES (%s,'verification_completed')",
+            (token["user_id"],),
+        )
+    return {"ok": True, "verified": True, "message": "Email verified. You can now sign in."}
+
+
+@app.post("/api/v1/auth/login")
+def email_login(body: EmailLoginRequest, response: Response) -> dict[str, Any]:
+    email = _normalized_email(body.email)
+    pool = _pool_or_503()
+    with pool.connection() as conn:
+        users = conn.execute(
+            """SELECT id,email,password_hash,email_verified,display_name,picture_url
+               FROM app_users WHERE lower(email)=%s ORDER BY created_at LIMIT 2""", (email,),
+        ).fetchall()
+    if len(users) != 1 or not users[0].get("password_hash"):
+        raise HTTPException(401, "Email or password is incorrect.")
+    user = users[0]
+    if not auth_security.verify_password(body.password, user["password_hash"]):
+        raise HTTPException(401, "Email or password is incorrect.")
+    if not user["email_verified"]:
+        raise HTTPException(403, "Verify your email address before signing in.")
+    csrf, session_token = secrets.token_urlsafe(32), secrets.token_urlsafe(48)
+    expires = datetime.now(timezone.utc) + SESSION_TTL
+    with pool.connection() as conn, conn.transaction():
+        conn.execute(
+            "INSERT INTO user_sessions(user_id,session_token_hash,csrf_token_hash,expires_at) VALUES (%s,%s,%s,%s)",
+            (user["id"], _hash(session_token), _hash(csrf), expires),
+        )
+    _set_session_cookies(response, session_token, csrf)
+    return {"authenticated": True, "email": user["email"], "display_name": user["display_name"],
+            "picture_url": user["picture_url"]}
+
+
+@app.post("/api/v1/auth/password-reset/request")
+async def request_password_reset(body: PasswordResetRequest) -> dict[str, Any]:
+    email = _normalized_email(body.email)
+    pool = _pool_or_503()
+    with pool.connection() as conn:
+        users = conn.execute(
+            """SELECT id,email FROM app_users
+               WHERE lower(email)=%s AND password_hash IS NOT NULL AND email_verified=true
+               ORDER BY created_at LIMIT 2""", (email,),
+        ).fetchall()
+    if len(users) == 1:
+        await _issue_account_token(str(users[0]["id"]), users[0]["email"], "reset_password")
+    return {"ok": True, "message": "If a verified password account exists, a reset link will be sent."}
+
+
+@app.post("/api/v1/auth/password-reset/complete")
+def complete_password_reset(body: PasswordResetCompleteRequest) -> dict[str, Any]:
+    try:
+        digest = auth_security.hash_one_time_token(body.token)
+        password_hash = auth_security.hash_password(body.password)
+    except ValueError:
+        raise HTTPException(400, "Reset link or password is invalid.") from None
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        token = conn.execute(
+            """UPDATE auth_token_issuance SET consumed_at=now()
+               WHERE token_hash=%s AND purpose='reset_password' AND consumed_at IS NULL AND expires_at>now()
+               RETURNING user_id""", (digest,),
+        ).fetchone()
+        if not token:
+            raise HTTPException(400, "Reset link is invalid, expired or already used.")
+        conn.execute(
+            """UPDATE app_users SET password_hash=%s,password_reset_hash=NULL,
+                      password_reset_expires_at=NULL,updated_at=now() WHERE id=%s""",
+            (password_hash, token["user_id"]),
+        )
+        conn.execute(
+            "UPDATE user_sessions SET revoked_at=now() WHERE user_id=%s AND revoked_at IS NULL",
+            (token["user_id"],),
+        )
+        conn.execute(
+            "INSERT INTO auth_email_events(user_id,event_type) VALUES (%s,'password_reset_completed')",
+            (token["user_id"],),
+        )
+    return {"ok": True, "message": "Password reset. Sign in with your new password."}
 
 
 class BridgeConnectRequest(BaseModel):
