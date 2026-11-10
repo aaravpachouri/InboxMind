@@ -73,6 +73,8 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [backendOnline, setBackendOnline] = useState(false);
   const [auth, setAuth] = useState<AuthStatus | null>(null);
+  const [sessionChecked, setSessionChecked] = useState(false);
+  const [accountAuthenticated, setAccountAuthenticated] = useState(false);
   const [authStatusUnavailable, setAuthStatusUnavailable] = useState(false);
   const [bridgeUrl, setBridgeUrl] = useState('');
   const [bridgeSecret, setBridgeSecret] = useState('');
@@ -316,11 +318,23 @@ export default function App() {
   }, [gmailQuery, notify, loadEmails]);
 
   useEffect(() => {
-    // React StrictMode replays mount effects in development; do not launch duplicate live requests.
-    if (initialLoadStarted.current) return;
+    let active = true;
+    api<{ authenticated: boolean }>('/auth/me')
+      .then(() => { if (active) { setAccountAuthenticated(true); setSessionChecked(true); } })
+      .catch((error) => {
+        if (!active) return;
+        setAccountAuthenticated(false);
+        setSessionChecked(true);
+        if (!(error instanceof ApiError && error.status === 401)) notify(errorText(error), 'error');
+      });
+    return () => { active = false; };
+  }, [notify]);
+
+  useEffect(() => {
+    if (!sessionChecked || !accountAuthenticated || initialLoadStarted.current) return;
     initialLoadStarted.current = true;
     void loadCore(true);
-  }, [loadCore]);
+  }, [sessionChecked, accountAuthenticated, loadCore]);
 
   // Re-check runtime connections on tab focus and periodically. This prevents an app opened
   // before the Python server starts from staying falsely disconnected until a full reload.
@@ -1063,6 +1077,15 @@ export default function App() {
     { label: 'New task', detail: 'Add a personal commitment', icon: Plus, group: 'Actions', action: () => setTaskModalOpen(true) },
     { label: 'Write an email with AI', detail: 'Generate a draft from a brief and your saved writing style', icon: WandSparkles, group: 'Actions', action: () => openWritingStudio('new') },
   ];
+
+  if (!sessionChecked) return <AccountAccess checking />;
+  if (!accountAuthenticated) return <AccountAccess onAuthenticated={async () => {
+    setAccountAuthenticated(true);
+    setSessionChecked(true);
+    initialLoadStarted.current = false;
+    await loadCore(true);
+    initialLoadStarted.current = true;
+  }} />;
 
   return (
     <div className={cx('app-shell', !sidebarOpen && 'sidebar-collapsed')}>
@@ -1846,3 +1869,126 @@ function Modal({ title, description, children, onClose, wide = false }: { title:
 function ConfirmDialog({ config, onCancel, onConfirm }: { config: DialogConfig; onCancel: () => void; onConfirm: () => void }) {
   return <Modal title={config.title} description={config.description} onClose={onCancel}><div className="confirm-icon-wrap"><div className={cx('confirm-icon', config.danger && 'danger')}><CircleAlert size={21} /></div><p>{config.danger ? 'This action affects your real account. Please review before continuing.' : 'Please confirm this action before the agent proceeds.'}</p></div><div className="modal-actions"><button className="button-secondary" onClick={onCancel}>Cancel</button><button className={cx('button-primary', config.danger && 'button-danger')} onClick={onConfirm}>{config.confirmLabel || 'Confirm'}</button></div></Modal>;
 }
+
+
+function AccountAccess({ checking = false, onAuthenticated }: {
+  checking?: boolean;
+  onAuthenticated?: () => Promise<void> | void;
+}) {
+  type Mode = 'login' | 'signup' | 'forgot' | 'verify' | 'reset';
+  const [mode, setMode] = useState<Mode>(() => {
+    const path = window.location.pathname;
+    if (path.endsWith('/auth/verify-email')) return 'verify';
+    if (path.endsWith('/auth/reset-password')) return 'reset';
+    return 'login';
+  });
+  const [email, setEmail] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [token, setToken] = useState(() => new URLSearchParams(window.location.search).get('token') || '');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError('');
+    setNotice('');
+    if ((mode === 'signup' || mode === 'reset') && password.length < 12) {
+      setError('Use a password with at least 12 characters.');
+      return;
+    }
+    if (mode === 'reset' && password !== confirmPassword) {
+      setError('The passwords do not match.');
+      return;
+    }
+    setBusy(true);
+    try {
+      if (mode === 'login') {
+        await api('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
+        await onAuthenticated?.();
+      } else if (mode === 'signup') {
+        const result = await api<{ message: string }>('/auth/signup', {
+          method: 'POST', body: JSON.stringify({ email, password, display_name: displayName }),
+        });
+        setNotice(result.message || 'Check your inbox for the verification link.');
+        setMode('verify');
+      } else if (mode === 'verify') {
+        const result = await api<{ message: string }>('/auth/verify-email', {
+          method: 'POST', body: JSON.stringify({ token }),
+        });
+        setNotice(result.message || 'Email verified. You can now sign in.');
+        window.history.replaceState({}, '', '/');
+        setMode('login');
+      } else if (mode === 'forgot') {
+        const result = await api<{ message: string }>('/auth/password-reset/request', {
+          method: 'POST', body: JSON.stringify({ email }),
+        });
+        setNotice(result.message || 'If your account exists, a reset link will be sent.');
+      } else {
+        const result = await api<{ message: string }>('/auth/password-reset/complete', {
+          method: 'POST', body: JSON.stringify({ token, password }),
+        });
+        setNotice(result.message || 'Password reset. Sign in with your new password.');
+        window.history.replaceState({}, '', '/');
+        setPassword('');
+        setConfirmPassword('');
+        setMode('login');
+      }
+    } catch (requestError) {
+      setError(errorText(requestError));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const title = mode === 'signup' ? 'Create your account'
+    : mode === 'forgot' ? 'Recover your account'
+      : mode === 'verify' ? 'Verify your email'
+        : mode === 'reset' ? 'Choose a new password' : 'Welcome back';
+  const description = mode === 'signup'
+    ? 'One private workspace for your inbox, tasks and AI assistant.'
+    : mode === 'verify' ? 'Confirm ownership of your email address to activate your account.'
+      : mode === 'reset' ? 'Choose a strong password to secure your InboxMind account.'
+        : mode === 'forgot' ? 'We’ll send a one-time recovery link if the account is eligible.'
+          : 'Sign in to continue to your private InboxMind workspace.';
+
+  if (checking) return <main className="auth-screen"><section className="auth-card auth-checking"><div className="auth-brand"><span><Sparkles size={19} /></span><strong>inbox<span>mind</span></strong></div><LoaderCircle className="spin" size={24} /><p>Checking your secure session…</p></section></main>;
+
+  return <main className="auth-screen">
+    <section className="auth-card">
+      <div className="auth-brand"><span><Sparkles size={19} /></span><strong>inbox<span>mind</span></strong></div>
+      <div className="auth-eyebrow">YOUR PERSONAL AI SECRETARY</div>
+      <h1>{title}</h1>
+      <p className="auth-description">{description}</p>
+      <form className="auth-form" onSubmit={(event) => void submit(event)}>
+        {mode === 'signup' && <label>Your name<input autoComplete="name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={120} placeholder="How should we address you?" /></label>}
+        {(mode === 'login' || mode === 'signup' || mode === 'forgot') && <label>Email address<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label>}
+        {(mode === 'login' || mode === 'signup') && <label>Password<input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required minLength={mode === 'signup' ? 12 : 1} maxLength={1024} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={mode === 'signup' ? 'At least 12 characters' : 'Your password'} /></label>}
+        {mode === 'reset' && <>
+          <label>New password<input type="password" autoComplete="new-password" required minLength={12} maxLength={1024} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 12 characters" /></label>
+          <label>Confirm new password<input type="password" autoComplete="new-password" required minLength={12} maxLength={1024} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Enter it again" /></label>
+        </>}
+        {(mode === 'verify' || mode === 'reset') && !token && <label>One-time token<input required value={token} onChange={(event) => setToken(event.target.value)} placeholder="Paste the token from your email" /></label>}
+        {error && <div className="auth-message auth-error" role="alert">{error}</div>}
+        {notice && <div className="auth-message auth-success" role="status">{notice}</div>}
+        <button className="auth-submit" type="submit" disabled={busy || ((mode === 'verify' || mode === 'reset') && !token)}>
+          {busy ? <LoaderCircle size={16} className="spin" /> : <ShieldCheck size={16} />}
+          {busy ? 'Please wait…' : mode === 'signup' ? 'Create account' : mode === 'forgot' ? 'Send recovery link' : mode === 'verify' ? 'Verify email' : mode === 'reset' ? 'Reset password' : 'Sign in'}
+        </button>
+      </form>
+      <div className="auth-links">
+        {mode === 'login' && <><button type="button" onClick={() => { setMode('signup'); setError(''); setNotice(''); }}>Create an account</button><button type="button" onClick={() => { setMode('forgot'); setError(''); setNotice(''); }}>Forgot password?</button></>}
+        {mode === 'signup' && <button type="button" onClick={() => { setMode('login'); setError(''); setNotice(''); }}>Already have an account? Sign in</button>}
+        {mode === 'forgot' && <button type="button" onClick={() => { setMode('login'); setError(''); setNotice(''); }}>Back to sign in</button>}
+        {(mode === 'verify' || mode === 'reset') && <button type="button" onClick={() => { setMode('login'); setToken(''); setError(''); setNotice(''); window.history.replaceState({}, '', '/'); }}>Back to sign in</button>}
+      </div>
+      {mode === 'login' && <div className="auth-divider"><span>OR</span></div>}
+      {mode === 'login' && <button type="button" className="auth-google" onClick={() => window.location.assign(API_BASE + '/auth/google/login')}><Mail size={16} /> Continue with Google</button>}
+      <div className="auth-footnote"><ShieldCheck size={14} /><span>Your mailbox is not connected until you authorize your own Gmail bridge. InboxMind never shares one user’s mailbox with another.</span></div>
+    </section>
+    <p className="auth-legal">Secure account access · Private workspace · You stay in control</p>
+  </main>;
+}
+
