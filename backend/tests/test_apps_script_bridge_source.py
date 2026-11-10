@@ -54,3 +54,11 @@ def test_bridge_does_not_expose_raw_exception_details_to_callers() -> None:
     do_post = source.split("function doPost(e) {", 1)[1].split("\nfunction jsonOutput_", 1)[0]
     assert 'error: "Request failed. Check the action and parameters."' in do_post
     assert 'error: String(err && err.message' not in do_post
+
+def test_bridge_uses_real_control_character_and_email_validation_patterns() -> None:
+    source = BRIDGE.read_text(encoding="utf-8")
+    assert r"/[\\u0000-\\u001f\\u007f]/" not in source
+    assert r"/^[^\\s@,;<>]+@[^\\s@,;<>]+\\.[^\\s@,;<>]+$/" not in source
+    assert r"/[\r\n\x00-\x1f\x7f]/g" in source
+    assert r"/^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/" in source
+    assert "requestedSize > 10" in source
