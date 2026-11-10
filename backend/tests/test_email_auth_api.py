@@ -14,6 +14,7 @@ def test_email_auth_and_admin_routes_are_registered():
         ("/api/v1/auth/signup", ("POST",)),
         ("/api/v1/auth/login", ("POST",)),
         ("/api/v1/auth/verify-email", ("POST",)),
+        ("/api/v1/auth/verification/resend", ("POST",)),
         ("/api/v1/auth/password-reset/request", ("POST",)),
         ("/api/v1/auth/password-reset/complete", ("POST",)),
         ("/api/v1/admin/overview", ("GET",)),
@@ -71,3 +72,20 @@ def test_password_reset_revokes_existing_sessions():
     source = inspect.getsource(public_app.complete_password_reset)
     assert "UPDATE user_sessions SET revoked_at=now()" in source
     assert "auth_token_issuance" in source
+
+
+
+def test_verification_resend_is_non_enumerating_and_rate_limited():
+    source = inspect.getsource(public_app.resend_email_verification)
+    limiter = inspect.getsource(public_app._record_auth_email_request)
+    assert "password_hash IS NOT NULL AND email_verified=false" in source
+    assert "If an unverified password account exists" in source
+    assert "limit=3" in source
+    assert "pg_advisory_xact_lock" in limiter
+    assert "auth_email_events" in limiter
+
+
+def test_password_reset_request_is_rate_limited():
+    source = inspect.getsource(public_app.request_password_reset)
+    assert "password_reset_requested" in source
+    assert "limit=3" in source
