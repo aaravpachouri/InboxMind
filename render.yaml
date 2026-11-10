@@ -5,7 +5,9 @@ services:
     plan: free
     region: singapore
     repo: https://github.com/aaravpachouri/InboxMind
-    branch: feat/secure-multi-tenant-deployment
+    # This is the isolated, tested release candidate. Do not switch the live
+    # Render service to this branch until the release checklist is approved.
+    branch: feat/universal-hosted-multi-tenant
     rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: python -m gmail_agent.migrate && uvicorn gmail_agent.public_app:app --host 0.0.0.0 --port $PORT
@@ -28,15 +30,24 @@ services:
         sync: false
       - key: GOOGLE_REDIRECT_URI
         sync: false
+      - key: FRONTEND_URL
+        value: https://inboxmind-rose.vercel.app
       - key: ALLOWED_ORIGINS
-        value: https://inboxmind-aaravpachouri.vercel.app
+        value: https://inboxmind-rose.vercel.app
+      - key: RESEND_API_KEY
+        sync: false
+      - key: INBOXMIND_AUTH_EMAIL_FROM
+        sync: false
+      - key: PLATFORM_ADMIN_EMAILS
+        sync: false
       - key: AUTO_SYNC_ENABLED
         value: "false"
-      # All inference runs on InboxMind's hosted provider, never on a user's computer.
+      # Zero-cost deployment uses the owner's already-running private worker.
+      # No hosted LLM API key or paid inference service is provisioned here.
       - key: AI_BACKEND_MODE
-        value: hosted
-      - key: GEMINI_MODEL
-        value: gemini-2.5-flash-lite
+        value: private_worker
+      - key: OLLAMA_MODEL
+        value: llama3.2:3b
       - key: APPS_SCRIPT_BRIDGE_URL
         value: ""
       - key: APPS_SCRIPT_BRIDGE_SECRET
