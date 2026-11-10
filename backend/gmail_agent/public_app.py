@@ -674,12 +674,13 @@ async def connect_apps_script_bridge(
     user = _current_user(session)
     _require_csrf(request, user)
     bridge_url = _validate_bridge_url(body.bridge_url.strip())
-    profile = await _bridge_request(bridge_url, body.bridge_secret, "profile")
+    bridge_secret = _validate_bridge_secret(body.bridge_secret)
+    profile = await _bridge_request(bridge_url, bridge_secret, "profile")
     email = str(profile.get("email", "")).strip().lower() if isinstance(profile, dict) else ""
-    if not email:
+    if not re.fullmatch(r"[^\\s@]+@[^\\s@]+\\.[^\\s@]+", email):
         raise HTTPException(502, "Bridge did not return a verified Gmail profile.")
     pool = _pool_or_503()
-    encrypted_secret = _fernet().encrypt(body.bridge_secret.encode())
+    encrypted_secret = _fernet().encrypt(bridge_secret.encode())
     try:
         with pool.connection() as conn, conn.transaction():
             _set_user_context(conn, str(user["id"]))
