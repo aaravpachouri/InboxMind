@@ -44,12 +44,17 @@ def test_private_database_routes_set_transaction_local_tenant_context():
         "list_memory", "create_memory", "delete_memory",
         "list_feedback", "create_feedback", "user_insights", "daily_briefing",
     )
+    insert_routes = {
+        "create_draft": "INSERT INTO user_drafts(user_id",
+        "create_memory": "INSERT INTO user_memories(user_id",
+        "create_feedback": "INSERT INTO user_feedback(user_id",
+    }
     for name in route_names:
         source = inspect.getsource(getattr(public_app, name))
-        assert "_set_user_context(conn, str(user[\"id\"]))" in source, name
-        if name == "create_draft":
-            assert "INSERT INTO user_drafts(user_id" in source
-            assert 'user["id"]' in source
+        assert '_set_user_context(conn, str(user["id"]))' in source, name
+        if name in insert_routes:
+            assert insert_routes[name] in source, name
+            assert 'user["id"]' in source, name
         else:
             assert "user_id=%s" in source, name
 
