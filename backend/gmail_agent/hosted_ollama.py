@@ -21,7 +21,7 @@ OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "5m")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
-AI_BACKEND_MODE = os.getenv("AI_BACKEND_MODE", "private_worker").strip().lower()
+AI_BACKEND_MODE = os.getenv("AI_BACKEND_MODE", "hosted").strip().lower()
 _semaphore = asyncio.Semaphore(OLLAMA_MAX_CONCURRENCY)
 
 
