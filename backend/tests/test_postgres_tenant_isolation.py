@@ -41,6 +41,13 @@ def test_postgres_rls_isolates_two_users_and_rejects_cross_tenant_writes():
                 (user_a, suffix),
             )
             conn.execute(
+                """INSERT INTO user_apps_script_bridges
+                   (user_id,google_account_email,bridge_url,bridge_secret_ciphertext)
+                   VALUES (%s,%s,%s,%s)""",
+                (user_a, f"gmail-a-{suffix}@example.test",
+                 f"https://script.google.com/macros/s/deployment-a-{suffix}/exec", b"cipher-a"),
+            )
+            conn.execute(
                 "INSERT INTO user_settings(user_id,settings) VALUES (%s,'{\"owner\":\"A\"}'::jsonb)",
                 (user_a,),
             )
@@ -63,6 +70,13 @@ def test_postgres_rls_isolates_two_users_and_rejects_cross_tenant_writes():
                 (user_b, suffix),
             )
             conn.execute(
+                """INSERT INTO user_apps_script_bridges
+                   (user_id,google_account_email,bridge_url,bridge_secret_ciphertext)
+                   VALUES (%s,%s,%s,%s)""",
+                (user_b, f"gmail-b-{suffix}@example.test",
+                 f"https://script.google.com/macros/s/deployment-b-{suffix}/exec", b"cipher-b"),
+            )
+            conn.execute(
                 "INSERT INTO user_settings(user_id,settings) VALUES (%s,'{\"owner\":\"B\"}'::jsonb)",
                 (user_b,),
             )
@@ -83,6 +97,12 @@ def test_postgres_rls_isolates_two_users_and_rejects_cross_tenant_writes():
             assert conn.execute(
                 "SELECT value FROM user_memories WHERE key=%s", (suffix,)
             ).fetchall() == [("A secret",)]
+            assert conn.execute(
+                "SELECT google_account_email,bridge_url FROM user_apps_script_bridges"
+            ).fetchall() == [(
+                f"gmail-a-{suffix}@example.test",
+                f"https://script.google.com/macros/s/deployment-a-{suffix}/exec",
+            )]
             assert conn.execute("SELECT settings->>'owner' FROM user_settings").fetchall() == [("A",)]
             assert conn.execute("SELECT title FROM user_tasks").fetchall() == [("A private task",)]
             assert conn.execute("SELECT payload->>'subject' FROM user_drafts").fetchall() == [("A",)]
