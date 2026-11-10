@@ -89,8 +89,8 @@ def test_postgres_rls_isolates_two_users_and_rejects_cross_tenant_writes():
             assert conn.execute("SELECT feedback_text FROM user_feedback").fetchall() == [("A private feedback",)]
 
             # PostgreSQL WITH CHECK policies must reject a forged user_id.
-            with conn.transaction():
-                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                with conn.transaction():
                     conn.execute(
                         "INSERT INTO user_memories(user_id,category,key,value) VALUES (%s,'test',%s,'forged')",
                         (user_b, f"forged-{suffix}"),
@@ -99,8 +99,8 @@ def test_postgres_rls_isolates_two_users_and_rejects_cross_tenant_writes():
             # With no tenant context, reads are empty and writes are denied.
             _set_tenant(conn, "")
             assert conn.execute("SELECT id FROM user_memories").fetchall() == []
-            with conn.transaction():
-                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                with conn.transaction():
                     conn.execute(
                         "INSERT INTO user_feedback(user_id,feedback_text) VALUES (%s,'no context')",
                         (user_a,),
