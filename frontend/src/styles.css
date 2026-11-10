@@ -2175,6 +2175,7 @@ body {
 .quick-full-briefing-copy .prose-bullet > span { width: 5px; height: 5px; margin-top: 7px; border-radius: 50%; background: #88aa6e; flex: 0 0 auto; }
 .quick-full-briefing-copy .prose-bullet p { margin: 0; }
 .quick-briefing-placeholder { margin: 0; color: #748273; font-size: 11px; line-height: 1.7; }
+.quick-briefing-coverage { margin: 9px 0 0; padding: 8px 10px; border: 1px solid #e7eddf; border-radius: 9px; color: #647462; background: #f7f9f2; font-size: 9px; line-height: 1.5; }
 .quick-briefing-detail-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; margin-top: 12px; }
 .quick-briefing-detail-group { min-width: 0; padding: 11px 12px; border: 1px solid #e8eee3; border-radius: 11px; background: rgba(255,255,252,.85); }
 .quick-briefing-detail-group h3, .quick-briefing-next-steps h3 { display: flex; align-items: center; gap: 7px; margin: 0 0 7px; color: #49634a; font-size: 9px; font-weight: 850; letter-spacing: .2px; }
