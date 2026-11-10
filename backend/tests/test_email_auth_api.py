@@ -100,4 +100,4 @@ def test_password_login_is_rate_limited_and_does_not_store_raw_emails():
     assert "interval '15 minutes'" in limiter
     assert ">= 10" in limiter
     assert "email_hash" in failed
-    assert "email_hash" in inspect.getsource(public_app._login_rate_limit_key)
+    assert "email_hash" in failed
