@@ -157,6 +157,9 @@ class EmailTokenRequest(BaseModel):
 class PasswordResetRequest(BaseModel):
     email: str = Field(min_length=5, max_length=320)
 
+class VerificationResendRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=320)
+
 
 class PasswordResetCompleteRequest(BaseModel):
     token: str = Field(min_length=20, max_length=256)
@@ -175,6 +178,26 @@ def _set_session_cookies(response: Response, session_token: str, csrf: str) -> N
                         max_age=int(SESSION_TTL.total_seconds()), path="/")
     response.set_cookie("inboxmind_csrf", csrf, httponly=False, secure=True, samesite="lax",
                         max_age=int(SESSION_TTL.total_seconds()), path="/")
+
+
+def _record_auth_email_request(conn: psycopg.Connection, user_id: str, event_type: str,
+                               *, limit: int = 3, window_minutes: int = 60) -> bool:
+    """Atomically enforce a per-account email-action limit across API workers."""
+    lock_key = f"inboxmind-auth-email:{user_id}:{event_type}"
+    conn.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (lock_key,))
+    recent = conn.execute(
+        """SELECT count(*) AS total FROM auth_email_events
+           WHERE user_id=%s AND event_type=%s
+             AND created_at > now() - (%s * interval '1 minute')""",
+        (user_id, event_type, window_minutes),
+    ).fetchone()
+    if int(recent["total"]) >= limit:
+        return False
+    conn.execute(
+        "INSERT INTO auth_email_events(user_id,event_type) VALUES (%s,%s)",
+        (user_id, event_type),
+    )
+    return True
 
 
 async def _issue_account_token(user_id: str, email: str, purpose: str) -> None:
@@ -237,6 +260,28 @@ async def email_signup(body: EmailSignupRequest) -> dict[str, Any]:
     await _issue_account_token(str(user["id"]), email, "verify_email")
     return {"ok": True, "verification_required": True,
             "message": "Check your email for a verification link before signing in."}
+
+
+@app.post("/api/v1/auth/verification/resend")
+async def resend_email_verification(body: VerificationResendRequest) -> dict[str, Any]:
+    """Resend verification without revealing whether an account exists."""
+    email = _normalized_email(body.email)
+    pool = _pool_or_503()
+    with pool.connection() as conn:
+        users = conn.execute(
+            """SELECT id,email FROM app_users
+               WHERE lower(email)=%s AND password_hash IS NOT NULL AND email_verified=false
+               ORDER BY created_at LIMIT 2""", (email,),
+        ).fetchall()
+    if len(users) == 1:
+        allowed = False
+        with pool.connection() as conn, conn.transaction():
+            allowed = _record_auth_email_request(
+                conn, str(users[0]["id"]), "verification_requested", limit=3, window_minutes=60
+            )
+        if allowed:
+            await _issue_account_token(str(users[0]["id"]), users[0]["email"], "verify_email")
+    return {"ok": True, "message": "If an unverified password account exists, a verification link will be sent."}
 
 
 @app.post("/api/v1/auth/verify-email")
@@ -307,7 +352,13 @@ async def request_password_reset(body: PasswordResetRequest) -> dict[str, Any]:
                ORDER BY created_at LIMIT 2""", (email,),
         ).fetchall()
     if len(users) == 1:
-        await _issue_account_token(str(users[0]["id"]), users[0]["email"], "reset_password")
+        allowed = False
+        with pool.connection() as conn, conn.transaction():
+            allowed = _record_auth_email_request(
+                conn, str(users[0]["id"]), "password_reset_requested", limit=3, window_minutes=60
+            )
+        if allowed:
+            await _issue_account_token(str(users[0]["id"]), users[0]["email"], "reset_password")
     return {"ok": True, "message": "If a verified password account exists, a reset link will be sent."}
 
 
