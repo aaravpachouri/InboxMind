@@ -89,3 +89,15 @@ def test_password_reset_request_is_rate_limited():
     source = inspect.getsource(public_app.request_password_reset)
     assert "password_reset_requested" in source
     assert "limit=3" in source
+
+def test_password_login_is_rate_limited_and_does_not_store_raw_emails():
+    source = inspect.getsource(public_app.email_login)
+    limiter = inspect.getsource(public_app._check_login_rate_limit)
+    failed = inspect.getsource(public_app._record_failed_login)
+    assert "_check_login_rate_limit(email)" in source
+    assert "_record_failed_login(email)" in source
+    assert "_clear_failed_logins(email)" in source
+    assert "interval '15 minutes'" in limiter
+    assert ">= 10" in limiter
+    assert "email_hash" in failed
+    assert "email_hash" in inspect.getsource(public_app._login_rate_limit_key)
