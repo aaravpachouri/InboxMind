@@ -66,3 +66,52 @@ def test_system_trash_label_cannot_be_applied_via_generic_label_route():
     client = make_client()
     with pytest.raises(RuntimeError, match="explicit confirm-protected Trash action"):
         client.modify_labels("message-1", ["TRASH"], [])
+
+
+def test_two_tenant_bridge_clients_never_share_deployment_or_secret():
+    settings_a = Settings(
+        apps_script_bridge_url="https://script.google.com/macros/s/deploymentA/exec",
+        apps_script_bridge_secret="a" * 43,
+        apps_script_bridge_timeout_seconds=12,
+    )
+    settings_b = Settings(
+        apps_script_bridge_url="https://script.google.com/macros/s/deploymentB/exec",
+        apps_script_bridge_secret="b" * 43,
+        apps_script_bridge_timeout_seconds=12,
+    )
+    client_a = AppsScriptGmailClient(settings_a)
+    client_b = AppsScriptGmailClient(settings_b)
+    calls = []
+
+    def request_a(payload):
+        calls.append(("tenant-a", client_a.url, payload["secret"], payload["action"]))
+        return {"ok": True, "result": {"email": "tenant-a@example.test"}}
+
+    def request_b(payload):
+        calls.append(("tenant-b", client_b.url, payload["secret"], payload["action"]))
+        return {"ok": True, "result": {"email": "tenant-b@example.test"}}
+
+    client_a._request = request_a
+    client_b._request = request_b
+
+    assert client_a.profile()["email"] == "tenant-a@example.test"
+    assert client_b.profile()["email"] == "tenant-b@example.test"
+    assert calls == [
+        ("tenant-a", settings_a.apps_script_bridge_url, "a" * 43, "profile"),
+        ("tenant-b", settings_b.apps_script_bridge_url, "b" * 43, "profile"),
+    ]
+    assert client_a.url != client_b.url
+    assert client_a.secret != client_b.secret
+
+
+def test_gmail_list_page_size_matches_apps_script_limit():
+    client = make_client()
+    seen = {}
+
+    def fake_request(payload):
+        seen.update(payload)
+        return {"ok": True, "result": {"items": [], "total_estimate": 0}}
+
+    client._request = fake_request
+    client.list_emails(max_results=50)
+    assert seen["params"]["max_results"] == 10
