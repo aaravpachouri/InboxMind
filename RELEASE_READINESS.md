@@ -21,7 +21,7 @@ Set these values in the Render service environment before switching the service 
 | `APPS_SCRIPT_ENCRYPTION_KEY` | Preserve the existing production Fernet key; do not rotate while encrypted bridge secrets exist |
 | `GOOGLE_CLIENT_ID` | Google OAuth Web client ID |
 | `GOOGLE_CLIENT_SECRET` | Matching Google OAuth client secret |
-| `GOOGLE_REDIRECT_URI` | `https://inboxmind-api-skqr.onrender.com/api/v1/auth/google/callback` |
+| `GOOGLE_REDIRECT_URI` | `https://inboxmind-rose.vercel.app/api/v1/auth/google/callback` |
 | `FRONTEND_URL` | `https://inboxmind-rose.vercel.app` |
 | `ALLOWED_ORIGINS` | `https://inboxmind-rose.vercel.app` |
 | `RESEND_API_KEY` | Optional account-email delivery provider key; signup/recovery email will fail closed without it |
@@ -31,7 +31,7 @@ Set these values in the Render service environment before switching the service 
 | `OLLAMA_MODEL` | `llama3.2:3b` (must match the installed model on the private worker) |
 | `AUTO_SYNC_ENABLED` | `false` until per-user sync has been explicitly validated |
 
-Google OAuth setup must include the exact redirect URI above. Keep the OAuth audience and test-user policy appropriate for the intended users.
+Google OAuth setup must include the exact Vercel same-origin callback URI above. The Vercel rewrite proxies `/api/v1/*` to Render; using the Vercel callback keeps the session cookie on the frontend origin. Set `GOOGLE_REDIRECT_URI` in Render to the same URI. Keep the OAuth audience and test-user policy appropriate for the intended users.
 
 ## Required Vercel configuration
 
@@ -56,4 +56,4 @@ Google OAuth setup must include the exact redirect URI above. Keep the OAuth aud
 
 The GitHub Actions workflow must pass backend tests (including disposable PostgreSQL RLS tests), Python compilation, and frontend production build. Then perform the live smoke test above on a separate test deployment and test database.
 
-Do not merge, change the live Render branch, apply migrations to the production database, or publish the frontend until the owner explicitly approves deployment. A green CI run is not a substitute for verifying required provider credentials, OAuth consent, email delivery, and the live worker.
+Before production deployment, inspect the production database for duplicate active `bridge_url` values because migration 0007 adds a unique partial index and will fail safely if duplicates exist. Do not merge, change the live Render branch, apply migrations to the production database, or publish the frontend until the owner explicitly approves deployment. A green CI run is not a substitute for verifying required provider credentials, OAuth consent, email delivery, and the live worker.
