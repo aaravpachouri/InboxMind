@@ -166,6 +166,14 @@ class PasswordResetCompleteRequest(BaseModel):
     password: str = Field(min_length=12, max_length=1024)
 
 
+def _reject_email_password_auth() -> None:
+    """Fail closed: hosted free release supports Google identity sign-in only."""
+    raise HTTPException(
+        status_code=410,
+        detail="Email/password accounts are not enabled. Sign in with Google instead.",
+    )
+
+
 def _normalized_email(value: str) -> str:
     email = value.strip().lower()
     if len(email) > 320 or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
@@ -243,6 +251,7 @@ async def _issue_account_token(user_id: str, email: str, purpose: str) -> None:
 
 @app.post("/api/v1/auth/signup")
 async def email_signup(body: EmailSignupRequest) -> dict[str, Any]:
+    _reject_email_password_auth()
     email = _normalized_email(body.email)
     password_hash = auth_security.hash_password(body.password)
     pool = _pool_or_503()
@@ -264,6 +273,7 @@ async def email_signup(body: EmailSignupRequest) -> dict[str, Any]:
 
 @app.post("/api/v1/auth/verification/resend")
 async def resend_email_verification(body: VerificationResendRequest) -> dict[str, Any]:
+    _reject_email_password_auth()
     """Resend verification without revealing whether an account exists."""
     email = _normalized_email(body.email)
     pool = _pool_or_503()
@@ -286,6 +296,7 @@ async def resend_email_verification(body: VerificationResendRequest) -> dict[str
 
 @app.post("/api/v1/auth/verify-email")
 def verify_email(body: EmailTokenRequest) -> dict[str, Any]:
+    _reject_email_password_auth()
     try:
         digest = auth_security.hash_one_time_token(body.token)
     except ValueError:
@@ -346,6 +357,7 @@ def _clear_failed_logins(email: str) -> None:
 
 @app.post("/api/v1/auth/login")
 def email_login(body: EmailLoginRequest, response: Response) -> dict[str, Any]:
+    _reject_email_password_auth()
     email = _normalized_email(body.email)
     _check_login_rate_limit(email)
     pool = _pool_or_503()
@@ -378,6 +390,7 @@ def email_login(body: EmailLoginRequest, response: Response) -> dict[str, Any]:
 
 @app.post("/api/v1/auth/password-reset/request")
 async def request_password_reset(body: PasswordResetRequest) -> dict[str, Any]:
+    _reject_email_password_auth()
     email = _normalized_email(body.email)
     pool = _pool_or_503()
     with pool.connection() as conn:
@@ -399,6 +412,7 @@ async def request_password_reset(body: PasswordResetRequest) -> dict[str, Any]:
 
 @app.post("/api/v1/auth/password-reset/complete")
 def complete_password_reset(body: PasswordResetCompleteRequest) -> dict[str, Any]:
+    _reject_email_password_auth()
     try:
         digest = auth_security.hash_one_time_token(body.token)
         password_hash = auth_security.hash_password(body.password)
