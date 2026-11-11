@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import time
 import json
+import logging
 import os
 import re
 import secrets
@@ -29,9 +30,10 @@ from gmail_agent import hosted_ollama
 hosted_ollama.validate_configuration()
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "")
-GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "")
+logger = logging.getLogger("inboxmind.auth")
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "").strip()
 APP_ENCRYPTION_KEY = os.getenv("APPS_SCRIPT_ENCRYPTION_KEY") or os.getenv("APP_ENCRYPTION_KEY", "")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://inboxmind-aaravpachouri.vercel.app").rstrip("/")
 ALLOWED_ORIGINS = [x.strip() for x in os.getenv("ALLOWED_ORIGINS", FRONTEND_URL).split(",") if x.strip()]
@@ -71,8 +73,19 @@ def _hash(value: str) -> bytes:
 
 
 def _check_oauth_config() -> None:
-    if not all((GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI)):
-        raise HTTPException(503, "Google OAuth is not configured on the backend yet.")
+    missing = [
+        name for name, value in (
+            ("GOOGLE_CLIENT_ID", GOOGLE_CLIENT_ID),
+            ("GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET),
+            ("GOOGLE_REDIRECT_URI", GOOGLE_REDIRECT_URI),
+        ) if not value
+    ]
+    if missing:
+        logger.error("Google OAuth configuration incomplete; missing variables: %s", ", ".join(missing))
+        raise HTTPException(
+            503,
+            "Google OAuth configuration is incomplete. Missing backend variables: " + ", ".join(missing),
+        )
 
 
 def _set_user_context(conn: psycopg.Connection, user_id: str) -> None:
