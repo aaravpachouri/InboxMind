@@ -1868,108 +1868,22 @@ function ConfirmDialog({ config, onCancel, onConfirm }: { config: DialogConfig; 
 }
 
 
-function AccountAccess({ checking = false, onAuthenticated }: {
+function AccountAccess({ checking = false }: {
   checking?: boolean;
   onAuthenticated?: () => Promise<void> | void;
 }) {
-  type Mode = 'login' | 'signup' | 'forgot' | 'verify' | 'reset';
-  const [mode, setMode] = useState<Mode>(() => {
-    const path = window.location.pathname;
-    if (path.endsWith('/auth/verify-email')) return 'verify';
-    if (path.endsWith('/auth/reset-password')) return 'reset';
-    return 'login';
-  });
-  const [email, setEmail] = useState('');
-  const [displayName, setDisplayName] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [token, setToken] = useState(() => new URLSearchParams(window.location.search).get('token') || '');
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-
-  const resendVerification = async () => {
-    if (!email.trim()) {
-      setError('Enter the email address you used to create your account first.');
-      return;
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('auth_error') === 'google_denied') {
+      setError('Google sign-in was cancelled. You can try again whenever you are ready.');
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (params.get('signed_in') === '1') {
+      setNotice('You are signed in. Loading your private workspace…');
+      window.history.replaceState({}, '', window.location.pathname);
     }
-    setBusy(true);
-    setError('');
-    setNotice('');
-    try {
-      const result = await api<{ message: string }>('/auth/verification/resend', {
-        method: 'POST', body: JSON.stringify({ email }),
-      });
-      setNotice(result.message || 'If an unverified account exists, a new verification link will be sent.');
-    } catch (requestError) {
-      setError(errorText(requestError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const submit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setError('');
-    setNotice('');
-    if ((mode === 'signup' || mode === 'reset') && password.length < 12) {
-      setError('Use a password with at least 12 characters.');
-      return;
-    }
-    if (mode === 'reset' && password !== confirmPassword) {
-      setError('The passwords do not match.');
-      return;
-    }
-    setBusy(true);
-    try {
-      if (mode === 'login') {
-        await api('/auth/login', { method: 'POST', body: JSON.stringify({ email, password }) });
-        await onAuthenticated?.();
-      } else if (mode === 'signup') {
-        const result = await api<{ message: string }>('/auth/signup', {
-          method: 'POST', body: JSON.stringify({ email, password, display_name: displayName }),
-        });
-        setNotice(result.message || 'Check your inbox for the verification link.');
-        setMode('verify');
-      } else if (mode === 'verify') {
-        const result = await api<{ message: string }>('/auth/verify-email', {
-          method: 'POST', body: JSON.stringify({ token }),
-        });
-        setNotice(result.message || 'Email verified. You can now sign in.');
-        window.history.replaceState({}, '', '/');
-        setMode('login');
-      } else if (mode === 'forgot') {
-        const result = await api<{ message: string }>('/auth/password-reset/request', {
-          method: 'POST', body: JSON.stringify({ email }),
-        });
-        setNotice(result.message || 'If your account exists, a reset link will be sent.');
-      } else {
-        const result = await api<{ message: string }>('/auth/password-reset/complete', {
-          method: 'POST', body: JSON.stringify({ token, password }),
-        });
-        setNotice(result.message || 'Password reset. Sign in with your new password.');
-        window.history.replaceState({}, '', '/');
-        setPassword('');
-        setConfirmPassword('');
-        setMode('login');
-      }
-    } catch (requestError) {
-      setError(errorText(requestError));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const title = mode === 'signup' ? 'Create your account'
-    : mode === 'forgot' ? 'Recover your account'
-      : mode === 'verify' ? 'Verify your email'
-        : mode === 'reset' ? 'Choose a new password' : 'Welcome back';
-  const description = mode === 'signup'
-    ? 'One private workspace for your inbox, tasks and AI assistant.'
-    : mode === 'verify' ? 'Confirm ownership of your email address to activate your account.'
-      : mode === 'reset' ? 'Choose a strong password to secure your InboxMind account.'
-        : mode === 'forgot' ? 'We’ll send a one-time recovery link if the account is eligible.'
-          : 'Sign in to continue to your private InboxMind workspace.';
+  }, []);
 
   if (checking) return <main className="auth-screen"><section className="auth-card auth-checking"><div className="auth-brand"><span><Sparkles size={19} /></span><strong>inbox<span>mind</span></strong></div><LoaderCircle className="spin" size={24} /><p>Checking your secure session…</p></section></main>;
 
@@ -1977,36 +1891,15 @@ function AccountAccess({ checking = false, onAuthenticated }: {
     <section className="auth-card">
       <div className="auth-brand"><span><Sparkles size={19} /></span><strong>inbox<span>mind</span></strong></div>
       <div className="auth-eyebrow">YOUR PERSONAL AI SECRETARY</div>
-      <h1>{title}</h1>
-      <p className="auth-description">{description}</p>
-      <form className="auth-form" onSubmit={(event) => void submit(event)}>
-        {mode === 'signup' && <label>Your name<input autoComplete="name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={120} placeholder="How should we address you?" /></label>}
-        {(mode === 'login' || mode === 'signup' || mode === 'forgot') && <label>Email address<input type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label>}
-        {(mode === 'login' || mode === 'signup') && <label>Password<input type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required minLength={mode === 'signup' ? 12 : 1} maxLength={1024} value={password} onChange={(event) => setPassword(event.target.value)} placeholder={mode === 'signup' ? 'At least 12 characters' : 'Your password'} /></label>}
-        {mode === 'reset' && <>
-          <label>New password<input type="password" autoComplete="new-password" required minLength={12} maxLength={1024} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 12 characters" /></label>
-          <label>Confirm new password<input type="password" autoComplete="new-password" required minLength={12} maxLength={1024} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Enter it again" /></label>
-        </>}
-        {(mode === 'verify' || mode === 'reset') && !token && <label>One-time token<input required value={token} onChange={(event) => setToken(event.target.value)} placeholder="Paste the token from your email" /></label>}
-        {error && <div className="auth-message auth-error" role="alert">{error}</div>}
-        {notice && <div className="auth-message auth-success" role="status">{notice}</div>}
-        <button className="auth-submit" type="submit" disabled={busy || ((mode === 'verify' || mode === 'reset') && !token)}>
-          {busy ? <LoaderCircle size={16} className="spin" /> : <ShieldCheck size={16} />}
-          {busy ? 'Please wait…' : mode === 'signup' ? 'Create account' : mode === 'forgot' ? 'Send recovery link' : mode === 'verify' ? 'Verify email' : mode === 'reset' ? 'Reset password' : 'Sign in'}
-        </button>
-      </form>
-      <div className="auth-links">
-        {mode === 'login' && <><button type="button" onClick={() => { setMode('signup'); setError(''); setNotice(''); }}>Create an account</button><button type="button" onClick={() => { setMode('forgot'); setError(''); setNotice(''); }}>Forgot password?</button></>}
-        {mode === 'signup' && <button type="button" onClick={() => { setMode('login'); setError(''); setNotice(''); }}>Already have an account? Sign in</button>}
-        {mode === 'verify' && <button type="button" disabled={busy} onClick={() => void resendVerification()}>Resend verification email</button>}
-        {mode === 'forgot' && <button type="button" onClick={() => { setMode('login'); setError(''); setNotice(''); }}>Back to sign in</button>}
-        {(mode === 'verify' || mode === 'reset') && <button type="button" onClick={() => { setMode('login'); setToken(''); setError(''); setNotice(''); window.history.replaceState({}, '', '/'); }}>Back to sign in</button>}
-      </div>
-      {mode === 'login' && <div className="auth-divider"><span>OR</span></div>}
-      {mode === 'login' && <button type="button" className="auth-google" onClick={() => window.location.assign(API_BASE + '/auth/google/login')}><Mail size={16} /> Continue with Google</button>}
-      <div className="auth-footnote"><ShieldCheck size={14} /><span>Your mailbox is not connected until you authorize your own Gmail bridge. InboxMind never shares one user’s mailbox with another.</span></div>
+      <h1>Welcome to InboxMind</h1>
+      <p className="auth-description">Sign in securely with your Google account to open your private InboxMind workspace.</p>
+      {error && <div className="auth-message auth-error" role="alert">{error}</div>}
+      {notice && <div className="auth-message auth-success" role="status">{notice}</div>}
+      <button type="button" className="auth-google" onClick={() => window.location.assign(API_BASE + '/auth/google/login')}>
+        <Mail size={16} /> Continue with Google
+      </button>
+      <div className="auth-footnote"><ShieldCheck size={14} /><span>Google is used only to verify your InboxMind identity. Your Gmail mailbox is connected separately, only when you authorize your own Apps Script bridge. InboxMind never shares one user’s mailbox with another.</span></div>
     </section>
     <p className="auth-legal">Secure account access · Private workspace · You stay in control</p>
   </main>;
 }
-

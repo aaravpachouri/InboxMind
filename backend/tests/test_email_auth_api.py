@@ -101,3 +101,24 @@ def test_password_login_is_rate_limited_and_does_not_store_raw_emails():
     assert ">= 10" in limiter
     assert "email_hash" in failed
     assert "email_hash" in failed
+
+
+
+def test_hosted_release_disables_all_email_password_auth_routes():
+    disabled_routes = (
+        public_app.email_signup,
+        public_app.resend_email_verification,
+        public_app.verify_email,
+        public_app.email_login,
+        public_app.request_password_reset,
+        public_app.complete_password_reset,
+    )
+    for route in disabled_routes:
+        assert "_reject_email_password_auth()" in inspect.getsource(route)
+
+
+def test_email_password_auth_fails_closed_without_email_provider():
+    with pytest.raises(HTTPException) as error:
+        public_app._reject_email_password_auth()
+    assert error.value.status_code == 410
+    assert "Sign in with Google instead" in str(error.value.detail)
