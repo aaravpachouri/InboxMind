@@ -18,7 +18,7 @@ Set these values in the Render service environment before switching the service 
 | Variable | Value / source |
 | --- | --- |
 | `DATABASE_URL` | Existing free `inboxmind-postgres` connection |
-| `APP_ENCRYPTION_KEY` | New Fernet key generated privately; never reuse a public value |
+| `APPS_SCRIPT_ENCRYPTION_KEY` | Preserve the existing production Fernet key; do not rotate while encrypted bridge secrets exist |
 | `GOOGLE_CLIENT_ID` | Google OAuth Web client ID |
 | `GOOGLE_CLIENT_SECRET` | Matching Google OAuth client secret |
 | `GOOGLE_REDIRECT_URI` | `https://inboxmind-api-skqr.onrender.com/api/v1/auth/google/callback` |
@@ -49,7 +49,7 @@ Google OAuth setup must include the exact redirect URI above. Keep the OAuth aud
 6. Confirm inbox, drafts, tasks, settings, memory, notifications, and AI jobs remain isolated between two test users.
 7. Confirm the private worker can process only its owner's queued jobs and that AI reports unavailable when the worker is stopped.
 8. Confirm send and Trash require deliberate user confirmation.
-9. Confirm account recovery, session revocation, and admin denial for a normal account.
+9. Confirm session revocation and admin denial for a normal account. Email/password recovery is disabled for this no-email-provider release.
 10. Inspect logs for secrets, raw auth tokens, message bodies, or cross-tenant data. None should be logged.
 
 ## Release gate
