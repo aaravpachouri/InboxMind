@@ -34,7 +34,8 @@ logger = logging.getLogger("inboxmind.auth")
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID", "").strip()
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "").strip()
-APP_ENCRYPTION_KEY = os.getenv("APPS_SCRIPT_ENCRYPTION_KEY") or os.getenv("APP_ENCRYPTION_KEY", "")
+GOOGLE_GMAIL_REDIRECT_URI = os.getenv("GOOGLE_GMAIL_REDIRECT_URI", "").strip()
+APP_ENCRYPTION_KEY = os.getenv("APP_ENCRYPTION_KEY") or os.getenv("APPS_SCRIPT_ENCRYPTION_KEY", "")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "https://inboxmind-aaravpachouri.vercel.app").rstrip("/")
 ALLOWED_ORIGINS = [x.strip() for x in os.getenv("ALLOWED_ORIGINS", FRONTEND_URL).split(",") if x.strip()]
 SESSION_COOKIE = "__Host-inboxmind_session"
@@ -42,6 +43,15 @@ SESSION_TTL = timedelta(days=7)
 SCOPES = [
     "openid", "email", "profile",
 ]
+GMAIL_SCOPES = [
+    "openid", "email", "profile",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.send",
+]
+REQUIRED_GMAIL_SCOPES = {
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.send",
+}
 app = FastAPI(title="InboxMind Secure API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=True,
@@ -61,11 +71,11 @@ def _pool_or_503() -> ConnectionPool:
 
 def _fernet() -> Fernet:
     if not APP_ENCRYPTION_KEY:
-        raise HTTPException(503, "APP_ENCRYPTION_KEY is not configured; Apps Script bridge secrets cannot be stored safely.")
+        raise HTTPException(503, "APP_ENCRYPTION_KEY is not configured; OAuth credentials cannot be stored safely.")
     try:
         return Fernet(APP_ENCRYPTION_KEY.encode())
     except (ValueError, TypeError):
-        raise HTTPException(503, "APP_ENCRYPTION_KEY must be a valid Fernet key to encrypt Apps Script bridge secrets.") from None
+        raise HTTPException(503, "APP_ENCRYPTION_KEY must be a valid Fernet key to encrypt OAuth credentials.") from None
 
 
 def _hash(value: str) -> bytes:
@@ -254,6 +264,191 @@ async def google_callback(code: str = "", state: str = "", error: str = "") -> R
     response.set_cookie("inboxmind_csrf", csrf, httponly=False, secure=True, samesite="lax",
                         max_age=int(SESSION_TTL.total_seconds()), path="/")
     return response
+
+
+def _check_gmail_oauth_config() -> None:
+    missing = [
+        name for name, value in (
+            ("GOOGLE_CLIENT_ID", GOOGLE_CLIENT_ID),
+            ("GOOGLE_CLIENT_SECRET", GOOGLE_CLIENT_SECRET),
+            ("GOOGLE_GMAIL_REDIRECT_URI", GOOGLE_GMAIL_REDIRECT_URI),
+        ) if not value
+    ]
+    if missing:
+        raise HTTPException(503, "Gmail OAuth configuration is incomplete. Missing backend variables: " + ", ".join(missing))
+
+
+def _validate_gmail_scopes(granted_scopes: list[str]) -> None:
+    missing = sorted(REQUIRED_GMAIL_SCOPES - set(granted_scopes))
+    if missing:
+        raise HTTPException(403, "Google did not grant the required Gmail permissions. Reconnect and approve the requested access.")
+
+
+@app.get("/api/v1/gmail/oauth/start")
+def gmail_oauth_start(
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> RedirectResponse:
+    """Start a Gmail-specific OAuth grant bound to the authenticated user and session."""
+    _check_gmail_oauth_config()
+    user = _current_user(session)
+    state = secrets.token_urlsafe(32)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        conn.execute(
+            """INSERT INTO oauth_transactions(user_id, session_id, state_hash, purpose, expires_at)
+               VALUES (%s, %s, %s, 'gmail_connect', %s)""",
+            (user["id"], user["session_id"], _hash(state), datetime.now(timezone.utc) + timedelta(minutes=10)),
+        )
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "redirect_uri": GOOGLE_GMAIL_REDIRECT_URI,
+        "response_type": "code",
+        "scope": " ".join(GMAIL_SCOPES),
+        "state": state,
+        "access_type": "offline",
+        "prompt": "consent select_account",
+        "include_granted_scopes": "true",
+    }
+    return RedirectResponse("https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params), status_code=302)
+
+
+@app.get("/api/v1/gmail/oauth/callback")
+async def gmail_oauth_callback(code: str = "", state: str = "", error: str = "") -> RedirectResponse:
+    if error:
+        return RedirectResponse(FRONTEND_URL + "/?gmail_connect_error=google_denied", status_code=302)
+    _check_gmail_oauth_config()
+    if not code or not state:
+        raise HTTPException(400, "Missing Gmail OAuth callback parameters.")
+
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        tx = conn.execute(
+            """UPDATE oauth_transactions AS tx
+               SET consumed_at=now()
+               WHERE tx.state_hash=%s AND tx.purpose='gmail_connect'
+                 AND tx.consumed_at IS NULL AND tx.expires_at > now()
+                 AND EXISTS (
+                   SELECT 1 FROM user_sessions s
+                   WHERE s.id=tx.session_id AND s.user_id=tx.user_id
+                     AND s.revoked_at IS NULL AND s.expires_at > now()
+                 )
+               RETURNING tx.user_id, tx.session_id""",
+            (_hash(state),),
+        ).fetchone()
+    if not tx:
+        raise HTTPException(400, "Gmail authorization expired or was already used. Start Connect Gmail again.")
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        token_response = await client.post(
+            "https://oauth2.googleapis.com/token",
+            data={
+                "code": code,
+                "client_id": GOOGLE_CLIENT_ID,
+                "client_secret": GOOGLE_CLIENT_SECRET,
+                "redirect_uri": GOOGLE_GMAIL_REDIRECT_URI,
+                "grant_type": "authorization_code",
+            },
+        )
+    if token_response.status_code != 200:
+        logger.warning("Google Gmail token exchange failed with status %s", token_response.status_code)
+        raise HTTPException(502, "Google could not complete Gmail authorization. Check the OAuth redirect URI and try again.")
+
+    tokens = token_response.json()
+    try:
+        claims = id_token.verify_oauth2_token(tokens["id_token"], GoogleRequest(), GOOGLE_CLIENT_ID)
+    except Exception:
+        raise HTTPException(401, "Google account identity could not be verified.") from None
+    if not claims.get("sub") or not claims.get("email") or claims.get("email_verified") is not True:
+        raise HTTPException(403, "A verified Google mailbox identity is required.")
+
+    granted_scopes = str(tokens.get("scope") or "").split()
+    _validate_gmail_scopes(granted_scopes)
+    refresh_token = str(tokens.get("refresh_token") or "")
+    access_token = str(tokens.get("access_token") or "")
+    if not refresh_token or not access_token:
+        raise HTTPException(502, "Google did not return offline Gmail credentials. Retry Connect Gmail and approve consent.")
+
+    encrypted_refresh = _fernet().encrypt(refresh_token.encode())
+    encrypted_access = _fernet().encrypt(access_token.encode())
+    expires_in = max(60, min(int(tokens.get("expires_in") or 3600), 86400))
+    access_expires = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(tx["user_id"]))
+        active_session = conn.execute(
+            """SELECT 1 FROM user_sessions
+               WHERE id=%s AND user_id=%s AND revoked_at IS NULL AND expires_at > now()""",
+            (tx["session_id"], tx["user_id"]),
+        ).fetchone()
+        if not active_session:
+            raise HTTPException(401, "Your InboxMind session expired during Gmail authorization. Sign in again.")
+        conn.execute(
+            """INSERT INTO gmail_accounts(
+                   user_id, google_account_sub, email, granted_scopes,
+                   refresh_token_ciphertext, access_token_ciphertext, access_token_expires_at, revoked_at
+               ) VALUES (%s,%s,%s,%s,%s,%s,%s,NULL)
+               ON CONFLICT(user_id, google_account_sub) DO UPDATE SET
+                   email=EXCLUDED.email,
+                   granted_scopes=EXCLUDED.granted_scopes,
+                   refresh_token_ciphertext=EXCLUDED.refresh_token_ciphertext,
+                   access_token_ciphertext=EXCLUDED.access_token_ciphertext,
+                   access_token_expires_at=EXCLUDED.access_token_expires_at,
+                   connected_at=now(), revoked_at=NULL""",
+            (tx["user_id"], claims["sub"], claims["email"].strip().lower(),
+             granted_scopes, encrypted_refresh, encrypted_access, access_expires),
+        )
+    return RedirectResponse(FRONTEND_URL + "/?gmail_connected=1", status_code=302)
+
+
+@app.get("/api/v1/gmail/accounts")
+def gmail_accounts(
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, Any]:
+    user = _current_user(session)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        rows = conn.execute(
+            """SELECT id, email, granted_scopes, connected_at
+               FROM gmail_accounts
+               WHERE user_id=%s AND revoked_at IS NULL
+               ORDER BY connected_at DESC""",
+            (user["id"],),
+        ).fetchall()
+    return {
+        "items": [
+            {"id": str(row["id"]), "email": row["email"], "scopes": row["granted_scopes"],
+             "connected_at": row["connected_at"].isoformat() if row["connected_at"] else None}
+            for row in rows
+        ]
+    }
+
+
+@app.post("/api/v1/gmail/accounts/{account_id}/disconnect")
+def disconnect_gmail_account(
+    account_id: str,
+    request: Request,
+    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
+) -> dict[str, bool]:
+    user = _current_user(session)
+    _require_csrf(request, user)
+    import uuid
+    try:
+        account_uuid = str(uuid.UUID(account_id))
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(404, "Gmail account not found.") from None
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        result = conn.execute(
+            """UPDATE gmail_accounts SET revoked_at=now()
+               WHERE user_id=%s AND id=%s AND revoked_at IS NULL""",
+            (user["id"], account_uuid),
+        )
+        if result.rowcount != 1:
+            raise HTTPException(404, "Gmail account not found.")
+    return {"ok": True}
 
 
 @app.get("/api/v1/auth/status")
