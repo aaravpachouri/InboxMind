@@ -64,3 +64,26 @@ def test_tenant_account_lookup_is_scoped_to_user_and_account(monkeypatch):
     sql = connection.execute.call_args.args[0]
     assert "user_id=%s AND id=%s" in sql
     assert connection.execute.call_args.args[1] == (client.user_id, client.account_id)
+
+
+
+def test_gmail_oauth_requires_modify_and_send_scopes():
+    from gmail_agent import public_app
+
+    public_app._validate_gmail_scopes([
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.send",
+    ])
+
+
+def test_gmail_oauth_rejects_missing_send_scope():
+    from fastapi import HTTPException
+    from gmail_agent import public_app
+
+    with pytest.raises(HTTPException) as exc:
+        public_app._validate_gmail_scopes([
+            "https://www.googleapis.com/auth/gmail.modify",
+        ])
+    assert exc.value.status_code == 403
