@@ -4,6 +4,7 @@ on:
   pull_request:
     branches:
       - feat/secure-multi-tenant-deployment
+      - feat/direct-google-gmail-oauth
   push:
     branches:
       - feat/hosted-ollama-production
