@@ -15,6 +15,7 @@ import {
 
 type View = 'overview' | 'analytics' | 'inbox' | 'priority' | 'tasks' | 'briefing' | 'assistant' | 'drafts' | 'calendar' | 'files' | 'business' | 'memory' | 'settings';
 type AuthStatus = { connected: boolean; email?: string | null; message?: string; scopes?: string[] };
+type AccountIdentity = { authenticated: boolean; email: string; display_name?: string | null; picture_url?: string | null };
 type Insights = {
   connected: boolean; last_sync?: string | null; email_count: number; unread_count: number;
   high_priority_count: number; open_tasks_count: number; overdue_tasks_count: number;
@@ -73,6 +74,9 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [backendOnline, setBackendOnline] = useState(false);
   const [auth, setAuth] = useState<AuthStatus | null>(null);
+  const [sessionChecked, setSessionChecked] = useState(false);
+  const [accountAuthenticated, setAccountAuthenticated] = useState(false);
+  const [accountIdentity, setAccountIdentity] = useState<AccountIdentity | null>(null);
   const [authStatusUnavailable, setAuthStatusUnavailable] = useState(false);
   const [bridgeUrl, setBridgeUrl] = useState('');
   const [bridgeSecret, setBridgeSecret] = useState('');
@@ -111,7 +115,7 @@ export default function App() {
   const [chatInput, setChatInput] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    { role: 'assistant', text: 'I’m your local-first email assistant. Ask me what needs attention, find a conversation, or turn an email into a practical next step.' },
+    { role: 'assistant', text: 'I’m your InboxMind AI assistant. I run securely on InboxMind’s hosted service. Ask what needs attention, find a conversation, or turn an email into a practical next step.' },
   ]);
   const [toast, setToast] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [dialog, setDialog] = useState<DialogConfig | null>(null);
@@ -316,11 +320,23 @@ export default function App() {
   }, [gmailQuery, notify, loadEmails]);
 
   useEffect(() => {
-    // React StrictMode replays mount effects in development; do not launch duplicate live requests.
-    if (initialLoadStarted.current) return;
+    let active = true;
+    api<AccountIdentity>('/auth/me')
+      .then((identity) => { if (active) { setAccountIdentity(identity); setAccountAuthenticated(true); setSessionChecked(true); } })
+      .catch((error) => {
+        if (!active) return;
+        setAccountAuthenticated(false);
+        setSessionChecked(true);
+        if (!(error instanceof ApiError && error.status === 401)) notify(errorText(error), 'error');
+      });
+    return () => { active = false; };
+  }, [notify]);
+
+  useEffect(() => {
+    if (!sessionChecked || !accountAuthenticated || initialLoadStarted.current) return;
     initialLoadStarted.current = true;
     void loadCore(true);
-  }, [loadCore]);
+  }, [sessionChecked, accountAuthenticated, loadCore]);
 
   // Re-check runtime connections on tab focus and periodically. This prevents an app opened
   // before the Python server starts from staying falsely disconnected until a full reload.
@@ -1064,6 +1080,12 @@ export default function App() {
     { label: 'Write an email with AI', detail: 'Generate a draft from a brief and your saved writing style', icon: WandSparkles, group: 'Actions', action: () => openWritingStudio('new') },
   ];
 
+  if (!sessionChecked) return <AccountAccess checking />;
+  if (!accountAuthenticated) return <AccountAccess onAuthenticated={() => {
+    setAccountAuthenticated(true);
+    setSessionChecked(true);
+  }} />;
+
   return (
     <div className={cx('app-shell', !sidebarOpen && 'sidebar-collapsed')}>
       <aside className={cx('sidebar', mobileNavOpen && 'mobile-open')}>
@@ -1104,8 +1126,8 @@ export default function App() {
           </div>
         </nav>
         {sidebarOpen && <div className="sidebar-bottom">
-          <div className="local-card"><div className="local-card-icon"><ShieldCheck size={17} /></div><div><strong>Private by default</strong><p>AI runs on this device.</p></div><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /></div>
-          <button className="account-row" onClick={() => go('settings')}><div className="account-avatar">{initialsFromAccount(auth?.email)}</div><div className="account-copy"><strong>{auth?.email ? auth.email.split('@')[0] : 'Local workspace'}</strong><span>{!backendOnline ? (loading ? 'Checking connection…' : 'Backend unavailable') : authStatusUnavailable ? 'Gmail status unavailable' : auth?.connected ? 'Gmail connected' : auth ? 'Connect Gmail' : 'Checking Gmail…'}</span></div><MoreHorizontal size={17} /></button>
+          <div className="local-card"><div className="local-card-icon"><ShieldCheck size={17} /></div><div><strong>Private by default</strong><p>AI runs on InboxMind servers.</p></div><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /></div>
+          <button className="account-row" onClick={() => go('settings')}><div className="account-avatar">{initialsFromAccount(accountIdentity?.email)}</div><div className="account-copy"><strong>{accountIdentity?.display_name || accountIdentity?.email || 'InboxMind account'}</strong><span>{!backendOnline ? (loading ? 'Checking connection…' : 'Backend unavailable') : authStatusUnavailable ? 'Gmail status unavailable' : auth?.connected ? 'Gmail connected' : 'Connect Gmail'}</span></div><MoreHorizontal size={17} /></button>
           <div className="sidebar-footnote">AI WRITER <span>·</span> v7.0</div>
         </div>}
       </aside>
@@ -1814,7 +1836,7 @@ function SettingsView({ auth, health, model, settings, busy, authStatusUnavailab
   const interval = Number(settings.sync_interval_seconds || 300);
   const currentModel = String(settings.ollama_model || model?.model || 'llama3.2:3b');
   const models = model?.installed_models || [];
-  return <div className="view"><SectionTitle eyebrow="YOUR CONTROL PANEL" title="Settings & privacy" detail="Keep the agent local, inspect its status, and choose how it behaves." actions={<button className="button-secondary" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={15} /> Refresh status</button>} />
+  return <div className="view"><SectionTitle eyebrow="YOUR CONTROL PANEL" title="Settings & privacy" detail="Manage your connected account, hosted AI and privacy controls." actions={<button className="button-secondary" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={15} /> Refresh status</button>} />
     <div className="settings-layout"><div className="settings-main">
       <Panel title="Connected account" subtitle="The Gmail identity the agent can access" icon={Mail}><div className="connected-account"><div className="connected-account-avatar"><Mail size={21} /></div><div className="connected-account-copy"><strong>{auth?.email || (authStatusUnavailable ? 'Gmail status unavailable' : 'No Gmail account connected')}</strong><span>{authStatusUnavailable ? 'The backend could not verify the bridge status. Retry before changing account authorization.' : auth?.connected ? 'Authorized through your local Google Apps Script bridge' : auth?.message || 'Connect an account to start working with live email.'}</span></div><Badge value={authStatusUnavailable ? 'Unknown' : auth?.connected ? 'Connected' : 'Not connected'} kind={authStatusUnavailable ? 'amber' : auth?.connected ? 'green' : 'amber'} /></div><div className="settings-row-action">{authStatusUnavailable ? <button className="button-secondary small" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={14} /> Retry connection check</button> : auth?.connected ? <p>Scopes: <code>{(auth.scopes || []).join(', ') || 'managed by local bridge'}</code></p> : /apps script bridge/i.test(auth?.message || '') ? <button className="button-secondary small" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={14} /> Check bridge setup</button> : <button className="button-primary small" onClick={onConnect}><ExternalLink size={14} /> Connect Gmail</button>}</div></Panel>
       <Panel title="AI engine" subtitle={model?.engine_mode === 'hosted' ? 'Your opted-in requests are processed by the configured hosted AI provider.' : 'Inference uses your configured private provider.'} icon={BrainCircuit}><div className="setting-toggle-row"><div className="setting-row-icon lilac"><Sparkles size={17} /></div><div className="setting-description"><strong>Enable AI analysis</strong><p>Allow the configured hosted AI model to summarize and reason over email that you explicitly request it to process.</p></div><Toggle value={aiEnabled} disabled={busy === 'settings'} onChange={(value) => onUpdate({ ai_enabled: value })} /></div><div className="model-setting">{model?.engine_mode === 'hosted' ? <div className="model-status"><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /><span>Server-managed model · {model?.model || 'Configured on the hosted AI service'}</span></div> : <label>Preferred Ollama model<select value={currentModel} onChange={(event) => onUpdate({ ollama_model: event.target.value })} disabled={busy === 'settings'}>{[...new Set([currentModel, ...models])].map((name) => <option key={name} value={name}>{name}</option>)}</select></label>}<div className="model-status"><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /><span>{modelStatusUnavailable ? 'Model status could not be checked. Refresh before changing model settings.' : model?.ai_enabled === false ? 'AI analysis is disabled. Enable it above to use the configured provider.' : model?.available ? `Ready · ${model.provider || 'Ollama'}` : model?.detail || 'The configured AI provider is not ready. Check its server configuration and availability.'}</span></div></div></Panel>
@@ -1833,7 +1855,7 @@ function SettingsView({ auth, health, model, settings, busy, authStatusUnavailab
       </Panel>}
       <Panel title="Background monitoring" subtitle="Routine sync can run while your local backend is running" icon={Activity}><div className="setting-toggle-row"><div className="setting-row-icon mint"><RefreshCw size={17} /></div><div className="setting-description"><strong>Automatic inbox sync</strong><p>Sync and index messages periodically. Background sync never sends, trashes, or archives messages.</p></div><Toggle value={autoSync} disabled={busy === 'settings'} onChange={(value) => onUpdate({ auto_sync_enabled: value })} /></div><div className="model-setting"><label>Sync interval<select value={String(interval)} onChange={(event) => onUpdate({ sync_interval_seconds: Number(event.target.value) })} disabled={busy === 'settings'}><option value="300">Every 5 minutes</option><option value="600">Every 10 minutes</option><option value="1800">Every 30 minutes</option><option value="3600">Every hour</option></select></label><p className="setting-footnote">This affects future sync cycles. InboxMind's backend must remain available.</p></div></Panel>
       <Panel title="Local storage" subtitle="Data files created by your backend" icon={FolderOpen}><div className="storage-row"><div><span>Database</span><strong>{String(health?.database || 'Local SQLite')}</strong></div><div><span>Local files folder</span><strong>{String(settings.local_files_dir || './local_files')}</strong></div><div><span>Data directory</span><strong>{String(settings.data_dir || './data')}</strong></div></div></Panel>
-    </div><div className="settings-aside"><div className="privacy-card"><div className="privacy-card-icon"><ShieldCheck size={21} /></div><h3>Private by default.</h3><p>The backend sends only explicitly requested, opted-in AI content to your configured private AI provider. The browser never connects directly to the model provider.</p><div className="privacy-checks"><span><CheckCircle2 size={14} /> Hosted AI mode</span><span><CheckCircle2 size={14} /> Explicit send approval</span><span><CheckCircle2 size={14} /> Trash, not permanent delete</span><span><CheckCircle2 size={14} /> API binds to loopback</span></div></div><Panel title="Runtime health" icon={Gauge}><div className="runtime-list"><RuntimeRow label="Backend" value={health ? 'Online' : 'Unknown'} ok={Boolean(health)} /><RuntimeRow label="Gmail bridge" value={authStatusUnavailable ? 'Unknown' : auth?.connected ? 'Connected' : 'Not connected'} ok={Boolean(auth?.connected && !authStatusUnavailable)} /><RuntimeRow label="AI model" value={modelStatusUnavailable ? 'Unknown' : model?.ai_enabled === false ? 'AI disabled' : model?.available ? 'Ready' : model ? 'Offline' : 'Checking'} ok={Boolean(model?.available && model?.ai_enabled !== false && !modelStatusUnavailable)} /><RuntimeRow label="Background sync" value={autoSync ? 'Enabled' : 'Paused'} ok={autoSync} /><RuntimeRow label="Data location" value="This device" ok /></div></Panel><div className="settings-warning"><CircleAlert size={16} /><p><strong>Protect local files.</strong> Email index data and preferences are stored in your local backend database. Use your operating system's disk encryption and protect backups.</p></div></div></div>
+    </div><div className="settings-aside"><div className="privacy-card"><div className="privacy-card-icon"><ShieldCheck size={21} /></div><h3>Private by default.</h3><p>The backend sends only explicitly requested, opted-in AI content to your configured private AI provider. The browser never connects directly to the model provider.</p><div className="privacy-checks"><span><CheckCircle2 size={14} /> Hosted AI mode</span><span><CheckCircle2 size={14} /> Explicit send approval</span><span><CheckCircle2 size={14} /> Trash, not permanent delete</span><span><CheckCircle2 size={14} /> Hosted processing</span></div></div><Panel title="Runtime health" icon={Gauge}><div className="runtime-list"><RuntimeRow label="Backend" value={health ? 'Online' : 'Unknown'} ok={Boolean(health)} /><RuntimeRow label="Gmail bridge" value={authStatusUnavailable ? 'Unknown' : auth?.connected ? 'Connected' : 'Not connected'} ok={Boolean(auth?.connected && !authStatusUnavailable)} /><RuntimeRow label="AI model" value={modelStatusUnavailable ? 'Unknown' : model?.ai_enabled === false ? 'AI disabled' : model?.available ? 'Ready' : model ? 'Offline' : 'Checking'} ok={Boolean(model?.available && model?.ai_enabled !== false && !modelStatusUnavailable)} /><RuntimeRow label="Background sync" value={autoSync ? 'Enabled' : 'Paused'} ok={autoSync} /><RuntimeRow label="Data location" value="Secure hosted storage" ok /></div></Panel><div className="settings-warning"><CircleAlert size={16} /><p><strong>Protect local files.</strong> Email index data and preferences are stored in your local backend database. Use your operating system's disk encryption and protect backups.</p></div></div></div>
   </div>;
 }
 function RuntimeRow({ label, value, ok }: { label: string; value: string; ok: boolean }) { return <div className="runtime-row"><span>{label}</span><strong><span className={cx('status-dot', ok ? 'green' : 'amber')} />{value}</strong></div>; }
@@ -1845,4 +1867,41 @@ function Modal({ title, description, children, onClose, wide = false }: { title:
 }
 function ConfirmDialog({ config, onCancel, onConfirm }: { config: DialogConfig; onCancel: () => void; onConfirm: () => void }) {
   return <Modal title={config.title} description={config.description} onClose={onCancel}><div className="confirm-icon-wrap"><div className={cx('confirm-icon', config.danger && 'danger')}><CircleAlert size={21} /></div><p>{config.danger ? 'This action affects your real account. Please review before continuing.' : 'Please confirm this action before the agent proceeds.'}</p></div><div className="modal-actions"><button className="button-secondary" onClick={onCancel}>Cancel</button><button className={cx('button-primary', config.danger && 'button-danger')} onClick={onConfirm}>{config.confirmLabel || 'Confirm'}</button></div></Modal>;
+}
+
+
+function AccountAccess({ checking = false }: {
+  checking?: boolean;
+  onAuthenticated?: () => Promise<void> | void;
+}) {
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('auth_error') === 'google_denied') {
+      setError('Google sign-in was cancelled. You can try again whenever you are ready.');
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (params.get('signed_in') === '1') {
+      setNotice('You are signed in. Loading your private workspace…');
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
+  if (checking) return <main className="auth-screen"><section className="auth-card auth-checking"><div className="auth-brand"><span><Sparkles size={19} /></span><strong>inbox<span>mind</span></strong></div><LoaderCircle className="spin" size={24} /><p>Checking your secure session…</p></section></main>;
+
+  return <main className="auth-screen">
+    <section className="auth-card">
+      <div className="auth-brand"><span><Sparkles size={19} /></span><strong>inbox<span>mind</span></strong></div>
+      <div className="auth-eyebrow">YOUR PERSONAL AI SECRETARY</div>
+      <h1>Welcome to InboxMind</h1>
+      <p className="auth-description">Sign in securely with your Google account to open your private InboxMind workspace.</p>
+      {error && <div className="auth-message auth-error" role="alert">{error}</div>}
+      {notice && <div className="auth-message auth-success" role="status">{notice}</div>}
+      <button type="button" className="auth-google" onClick={() => window.location.assign(API_BASE + '/auth/google/login')}>
+        <Mail size={16} /> Continue with Google
+      </button>
+      <div className="auth-footnote"><ShieldCheck size={14} /><span>Google is used only to verify your InboxMind identity. Your Gmail mailbox is connected separately, only when you authorize your own Apps Script bridge. InboxMind never shares one user’s mailbox with another.</span></div>
+    </section>
+    <p className="auth-legal">Secure account access · Private workspace · You stay in control</p>
+  </main>;
 }
