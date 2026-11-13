@@ -78,9 +78,6 @@ export default function App() {
   const [accountAuthenticated, setAccountAuthenticated] = useState(false);
   const [accountIdentity, setAccountIdentity] = useState<AccountIdentity | null>(null);
   const [authStatusUnavailable, setAuthStatusUnavailable] = useState(false);
-  const [bridgeUrl, setBridgeUrl] = useState('');
-  const [bridgeSecret, setBridgeSecret] = useState('');
-  const [bridgeConnecting, setBridgeConnecting] = useState(false);
   const [modelStatusUnavailable, setModelStatusUnavailable] = useState(false);
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
   const [insights, setInsights] = useState<Insights | null>(null);
@@ -1042,27 +1039,8 @@ export default function App() {
     finally { setBusy(null); }
   };
 
-  const connectAppsScriptBridge = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!bridgeUrl.trim() || bridgeSecret.length < 32) {
-      notify('Enter your Apps Script /exec URL and its 32+ character bridge secret.', 'error');
-      return;
-    }
-    setBridgeConnecting(true);
-    try {
-      const result = await api<{ connected: boolean; email: string; message: string }>('/apps-script/login', {
-        method: 'POST',
-        body: JSON.stringify({ bridge_url: bridgeUrl.trim(), bridge_secret: bridgeSecret }),
-      });
-      setBridgeSecret('');
-      setAuth({ connected: result.connected, email: result.email, message: result.message });
-      notify(`Connected Apps Script mailbox: ${result.email}`);
-      await refreshAll();
-    } catch (error) {
-      notify(errorText(error), 'error');
-    } finally {
-      setBridgeConnecting(false);
-    }
+  const openGmailConnect = () => {
+    window.location.assign(`${API_BASE}/gmail/oauth/start`);
   };
 
   const openLogin = () => {
@@ -1151,13 +1129,7 @@ export default function App() {
 
         {!backendOnline && !loading && <div className="connection-banner error-banner"><CircleAlert size={17} /><div><strong>Backend unavailable</strong><span>Start the Python API at <code>127.0.0.1:8000</code>, then refresh this page.</span></div><button className="text-button" onClick={() => void refreshAll()}>Retry</button></div>}
         {backendOnline && authStatusUnavailable && <div className="connection-banner status-warning-banner"><CircleAlert size={17} /><div><strong>Gmail status couldn't be verified</strong><span>The backend is responding, but its auth-status check failed. Retry before reconnecting so we don't mislabel a connected account.</span></div><button className="text-button" onClick={() => void refreshAll()}>Retry status</button></div>}
-        {backendOnline && !authStatusUnavailable && auth && !auth.connected && <div className="connection-banner"><Mail size={17} /><div><strong>Connect Gmail through Apps Script</strong><span>{auth?.message || 'Connect your personal Apps Script deployment.'}</span></div></div>}
-        {backendOnline && !authStatusUnavailable && auth && !auth.connected && (auth.message?.toLowerCase().includes('signed in.') || auth.message?.toLowerCase().startsWith('sign in')) && <form className="connection-banner" onSubmit={(event) => void connectAppsScriptBridge(event)} style={{ alignItems: 'stretch', flexWrap: 'wrap' }}>
-          <div style={{ flexBasis: '100%' }}><strong>Your personal Apps Script bridge</strong><span>Use your own Apps Script web-app /exec URL and its BRIDGE_SECRET from Script Properties. The secret authenticates your mailbox through your personal deployment, is sent over HTTPS, and is stored encrypted.</span></div>
-          <input aria-label="Apps Script web app URL" type="url" required placeholder="https://script.google.com/macros/s/.../exec" value={bridgeUrl} onChange={(event) => setBridgeUrl(event.target.value)} autoComplete="url" />
-          <input aria-label="Apps Script bridge secret" type="password" required minLength={32} placeholder="Bridge secret (32+ characters)" value={bridgeSecret} onChange={(event) => setBridgeSecret(event.target.value)} autoComplete="new-password" />
-          <button className="small-primary" type="submit" disabled={bridgeConnecting}>{bridgeConnecting ? 'Verifying…' : 'Verify & connect'}</button>
-        </form>}
+        {backendOnline && !authStatusUnavailable && auth && !auth.connected && <div className="connection-banner"><Mail size={17} /><div><strong>Connect your Gmail account</strong><span>{auth?.message || 'Authorize InboxMind to access your mailbox directly through Google OAuth.'}</span></div><button className="small-primary" onClick={() => window.location.assign(`${API_BASE}/gmail/oauth/start`)}>Connect Gmail</button></div>}
 
         <div className="page-content">
           {view === 'analytics' && <BusinessAnalyticsView
@@ -1207,7 +1179,7 @@ export default function App() {
           {view === 'files' && <FilesView fileSearch={fileSearch} setFileSearch={setFileSearch} results={fileResults} indexStats={indexStats} busy={busy} onSearch={searchLocalFiles} onIndex={indexLocalFiles} />}
           {view === 'business' && <BusinessProfileView memories={memories} busy={busy} onSave={saveMemory} onRefresh={refreshMemories} />}
           {view === 'memory' && <MemoryView memories={memories} feedbackItems={feedbackItems} busy={busy} onSaveMemory={saveMemory} onDeleteMemory={deleteMemory} onSubmitFeedback={submitFeedback} />}
-          {view === 'settings' && <SettingsView auth={auth} health={health} model={model} settings={settings} busy={busy} authStatusUnavailable={authStatusUnavailable} modelStatusUnavailable={modelStatusUnavailable} workerToken={workerToken} onConnect={openLogin} onRefresh={refreshAll} onUpdate={updateSetting} onRegisterWorker={registerLocalWorker} onRevokeWorker={revokeLocalWorker} />}
+          {view === 'settings' && <SettingsView auth={auth} health={health} model={model} settings={settings} busy={busy} authStatusUnavailable={authStatusUnavailable} modelStatusUnavailable={modelStatusUnavailable} workerToken={workerToken} onConnect={openGmailConnect} onRefresh={refreshAll} onUpdate={updateSetting} onRegisterWorker={registerLocalWorker} onRevokeWorker={revokeLocalWorker} />}
         </div>
 
         <footer className="app-footer"><span><span className={cx('status-dot', backendOnline ? 'green' : 'red')} /> {backendOnline ? 'Local backend connected' : 'Backend offline'}</span><span><ShieldCheck size={13} /> Local-first · no paid AI APIs</span><span>API <code>{API_BASE.replace('/api/v1', '')}</code></span></footer>
@@ -1838,7 +1810,7 @@ function SettingsView({ auth, health, model, settings, busy, authStatusUnavailab
   const models = model?.installed_models || [];
   return <div className="view"><SectionTitle eyebrow="YOUR CONTROL PANEL" title="Settings & privacy" detail="Manage your connected account, hosted AI and privacy controls." actions={<button className="button-secondary" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={15} /> Refresh status</button>} />
     <div className="settings-layout"><div className="settings-main">
-      <Panel title="Connected account" subtitle="The Gmail identity the agent can access" icon={Mail}><div className="connected-account"><div className="connected-account-avatar"><Mail size={21} /></div><div className="connected-account-copy"><strong>{auth?.email || (authStatusUnavailable ? 'Gmail status unavailable' : 'No Gmail account connected')}</strong><span>{authStatusUnavailable ? 'The backend could not verify the bridge status. Retry before changing account authorization.' : auth?.connected ? 'Authorized through your local Google Apps Script bridge' : auth?.message || 'Connect an account to start working with live email.'}</span></div><Badge value={authStatusUnavailable ? 'Unknown' : auth?.connected ? 'Connected' : 'Not connected'} kind={authStatusUnavailable ? 'amber' : auth?.connected ? 'green' : 'amber'} /></div><div className="settings-row-action">{authStatusUnavailable ? <button className="button-secondary small" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={14} /> Retry connection check</button> : auth?.connected ? <p>Scopes: <code>{(auth.scopes || []).join(', ') || 'managed by local bridge'}</code></p> : /apps script bridge/i.test(auth?.message || '') ? <button className="button-secondary small" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={14} /> Check bridge setup</button> : <button className="button-primary small" onClick={onConnect}><ExternalLink size={14} /> Connect Gmail</button>}</div></Panel>
+      <Panel title="Connected account" subtitle="The Gmail identity the agent can access" icon={Mail}><div className="connected-account"><div className="connected-account-avatar"><Mail size={21} /></div><div className="connected-account-copy"><strong>{auth?.email || (authStatusUnavailable ? 'Gmail status unavailable' : 'No Gmail account connected')}</strong><span>{authStatusUnavailable ? 'The backend could not verify the bridge status. Retry before changing account authorization.' : auth?.connected ? 'Authorized directly with Google OAuth' : auth?.message || 'Connect an account to start working with live email.'}</span></div><Badge value={authStatusUnavailable ? 'Unknown' : auth?.connected ? 'Connected' : 'Not connected'} kind={authStatusUnavailable ? 'amber' : auth?.connected ? 'green' : 'amber'} /></div><div className="settings-row-action">{authStatusUnavailable ? <button className="button-secondary small" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={14} /> Retry connection check</button> : auth?.connected ? <p>Scopes: <code>{(auth.scopes || []).join(', ') || 'Google OAuth'}</code></p> : /apps script bridge/i.test(auth?.message || '') ? <button className="button-secondary small" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={14} /> Refresh status</button> : <button className="button-primary small" onClick={onConnect}><ExternalLink size={14} /> Connect Gmail</button>}</div></Panel>
       <Panel title="AI engine" subtitle={model?.engine_mode === 'hosted' ? 'Your opted-in requests are processed by the configured hosted AI provider.' : 'Inference uses your configured private provider.'} icon={BrainCircuit}><div className="setting-toggle-row"><div className="setting-row-icon lilac"><Sparkles size={17} /></div><div className="setting-description"><strong>Enable AI analysis</strong><p>Allow the configured hosted AI model to summarize and reason over email that you explicitly request it to process.</p></div><Toggle value={aiEnabled} disabled={busy === 'settings'} onChange={(value) => onUpdate({ ai_enabled: value })} /></div><div className="model-setting">{model?.engine_mode === 'hosted' ? <div className="model-status"><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /><span>Server-managed model · {model?.model || 'Configured on the hosted AI service'}</span></div> : <label>Preferred Ollama model<select value={currentModel} onChange={(event) => onUpdate({ ollama_model: event.target.value })} disabled={busy === 'settings'}>{[...new Set([currentModel, ...models])].map((name) => <option key={name} value={name}>{name}</option>)}</select></label>}<div className="model-status"><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /><span>{modelStatusUnavailable ? 'Model status could not be checked. Refresh before changing model settings.' : model?.ai_enabled === false ? 'AI analysis is disabled. Enable it above to use the configured provider.' : model?.available ? `Ready · ${model.provider || 'Ollama'}` : model?.detail || 'The configured AI provider is not ready. Check its server configuration and availability.'}</span></div></div></Panel>
       {model?.engine_mode !== 'hosted' && <Panel title="Private Windows AI worker" subtitle="Migration option: run Ollama on your own PC; this dashboard sends jobs over an authenticated outbound connection." icon={BrainCircuit}>
         <div className="model-setting">
@@ -1900,7 +1872,7 @@ function AccountAccess({ checking = false }: {
       <button type="button" className="auth-google" onClick={() => window.location.assign(API_BASE + '/auth/google/login')}>
         <Mail size={16} /> Continue with Google
       </button>
-      <div className="auth-footnote"><ShieldCheck size={14} /><span>Google is used only to verify your InboxMind identity. Your Gmail mailbox is connected separately, only when you authorize your own Apps Script bridge. InboxMind never shares one user’s mailbox with another.</span></div>
+      <div className="auth-footnote"><ShieldCheck size={14} /><span>Google verifies your InboxMind identity. Gmail access is a separate authorization that you grant directly to InboxMind; mailbox credentials are encrypted and scoped to your account.</span></div>
     </section>
     <p className="auth-legal">Secure account access · Private workspace · You stay in control</p>
   </main>;

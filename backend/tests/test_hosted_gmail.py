@@ -87,3 +87,39 @@ def test_gmail_oauth_rejects_missing_send_scope():
             "https://www.googleapis.com/auth/gmail.modify",
         ])
     assert exc.value.status_code == 403
+
+
+def test_hosted_gmail_resolver_rejects_ambiguous_accounts(monkeypatch):
+    from fastapi import HTTPException
+    from gmail_agent import public_app
+
+    connection = MagicMock()
+    pool = MagicMock()
+    pool.connection.return_value.__enter__.return_value = connection
+    connection.execute.return_value.fetchall.return_value = [
+        {"id": "00000000-0000-0000-0000-000000000002", "email": "one@example.com"},
+        {"id": "00000000-0000-0000-0000-000000000003", "email": "two@example.com"},
+    ]
+    monkeypatch.setattr(public_app, "_pool_or_503", lambda: pool)
+    monkeypatch.setattr(public_app, "_set_user_context", lambda conn, user: None)
+    with pytest.raises(HTTPException) as exc:
+        public_app._get_hosted_gmail({"id": "00000000-0000-0000-0000-000000000001"})
+    assert exc.value.status_code == 409
+
+
+def test_hosted_gmail_resolver_rejects_account_from_another_tenant(monkeypatch):
+    from fastapi import HTTPException
+    from gmail_agent import public_app
+
+    connection = MagicMock()
+    pool = MagicMock()
+    pool.connection.return_value.__enter__.return_value = connection
+    connection.execute.return_value.fetchall.return_value = []
+    monkeypatch.setattr(public_app, "_pool_or_503", lambda: pool)
+    monkeypatch.setattr(public_app, "_set_user_context", lambda conn, user: None)
+    with pytest.raises(HTTPException) as exc:
+        public_app._get_hosted_gmail(
+            {"id": "00000000-0000-0000-0000-000000000001"},
+            "00000000-0000-0000-0000-000000000002",
+        )
+    assert exc.value.status_code == 404

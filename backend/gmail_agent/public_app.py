@@ -125,6 +125,40 @@ def _require_csrf(request: Request, user: dict[str, Any]) -> None:
         raise HTTPException(403, "CSRF validation failed. Refresh the page and retry.")
 
 
+
+def _get_hosted_gmail(user: dict[str, Any], account_id: str | None = None):
+    """Resolve one active Gmail mailbox within the authenticated tenant."""
+    from gmail_agent.hosted_gmail import HostedGmail
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        if account_id:
+            try:
+                selected_id = str(__import__("uuid").UUID(account_id))
+            except (ValueError, TypeError, AttributeError):
+                raise HTTPException(404, "Gmail account not found.") from None
+            rows = conn.execute(
+                """SELECT id, email FROM gmail_accounts
+                   WHERE user_id=%s AND id=%s AND revoked_at IS NULL""",
+                (user["id"], selected_id),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT id, email FROM gmail_accounts
+                   WHERE user_id=%s AND revoked_at IS NULL
+                   ORDER BY connected_at DESC LIMIT 2""",
+                (user["id"],),
+            ).fetchall()
+    if not rows:
+        if account_id:
+            raise HTTPException(404, "Gmail account not found.")
+        raise HTTPException(409, "Connect a Gmail account before opening the inbox.")
+    if len(rows) > 1:
+        raise HTTPException(409, "More than one Gmail account is connected. Select an account in Settings.")
+    row = rows[0]
+    return HostedGmail(str(user["id"]), str(row["id"])), str(row["email"]), str(row["id"])
+
+
 @app.get("/health")
 @app.get("/api/v1/health")
 def health() -> dict[str, str]:
@@ -454,24 +488,31 @@ def disconnect_gmail_account(
 @app.get("/api/v1/auth/status")
 async def auth_status(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     if not session:
-        return {"connected": False, "email": None, "message": "Sign in to connect your personal Apps Script bridge."}
+        return {"connected": False, "email": None, "message": "Sign in with Google to continue."}
     try:
         user = _current_user(session)
     except HTTPException as exc:
         if exc.status_code == 401:
             return {"connected": False, "email": None, "message": "Session expired. Sign in again."}
         raise
-    try:
-        bridge = _get_user_bridge(user)
-    except HTTPException as exc:
-        if exc.status_code == 409:
-            return {"connected": False, "email": None, "message": "Signed in. Connect your personal Apps Script bridge to access Gmail."}
-        raise
-    profile = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "profile")
-    email = str(profile.get("email", "")).strip().lower() if isinstance(profile, dict) else ""
-    if email != str(bridge["google_account_email"]).lower():
-        raise HTTPException(502, "Apps Script mailbox identity changed. Reconnect the bridge.")
-    return {"connected": True, "email": email, "message": "Gmail connected through your personal Apps Script deployment."}
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        _set_user_context(conn, str(user["id"]))
+        rows = conn.execute(
+            """SELECT id, email, granted_scopes FROM gmail_accounts
+               WHERE user_id=%s AND revoked_at IS NULL ORDER BY connected_at DESC LIMIT 2""",
+            (user["id"],),
+        ).fetchall()
+    if not rows:
+        return {"connected": False, "email": None,
+                "message": "Signed in. Connect your Gmail mailbox to access messages."}
+    if len(rows) > 1:
+        return {"connected": False, "email": None,
+                "message": "Multiple Gmail accounts are connected. Select one in Settings.",
+                "accounts": [{"id": str(row["id"]), "email": row["email"]} for row in rows]}
+    return {"connected": True, "email": rows[0]["email"], "account_id": str(rows[0]["id"]),
+            "scopes": rows[0]["granted_scopes"] or [],
+            "message": "Gmail connected directly through Google OAuth."}
 
 
 @app.get("/api/v1/auth/me")
@@ -614,27 +655,15 @@ async def list_emails(
     page_token: str | None = Query(default=None, max_length=500),
     offset: int = Query(default=0, ge=0),
     live: bool = Query(default=True),
+    account_id: str | None = Query(default=None, max_length=64),
     session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
 ) -> dict[str, Any]:
     user = _current_user(session)
-    bridge = _get_user_bridge(user)
-    # Apps Script currently caps each page at 10 messages; pass through the user's
-    # search and page token instead of silently forcing every request to the inbox.
-    result = await _bridge_request(
-        bridge["bridge_url"], bridge["bridge_secret"], "list_emails",
-        {"max_results": min(limit, 10), "query": query or "in:inbox",
-         "page_token": page_token or str(offset // min(limit, 10)) if offset else (page_token or "0")},
-    )
-    if not isinstance(result, dict) or not isinstance(result.get("items", []), list):
-        raise HTTPException(502, "Apps Script bridge returned an invalid email page.")
-    return {
-        "items": result.get("items", []),
-        "total": result.get("total_estimate", len(result.get("items", []))),
-        "total_estimate": result.get("total_estimate", len(result.get("items", []))),
-        "next_page_token": result.get("next_page_token"),
-        "source": "apps_script",
-        "account_email": bridge["google_account_email"],
-    }
+    gmail, email, selected_id = _get_hosted_gmail(user, account_id)
+    result = gmail.list_emails(query=query or "in:inbox", limit=limit, page_token=page_token)
+    return {"items": result["items"], "total": result["total_estimate"],
+            "total_estimate": result["total_estimate"], "next_page_token": result.get("next_page_token"),
+            "source": "gmail", "account_email": email, "account_id": selected_id}
 
 
 class EmailActionRequest(BaseModel):
@@ -651,132 +680,92 @@ class CreateLabelRequest(BaseModel):
 
 
 @app.get("/api/v1/emails/{message_id}")
-async def get_email(
-    message_id: str,
-    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
-) -> dict[str, Any]:
+async def get_email(message_id: str, account_id: str | None = Query(default=None, max_length=64),
+                    session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
-    bridge = _get_user_bridge(user)
-    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "get_email", {"message_id": message_id})
-    if not isinstance(result, dict):
-        raise HTTPException(502, "Apps Script bridge returned an invalid email.")
-    return result
+    gmail, _, _ = _get_hosted_gmail(user, account_id)
+    return gmail.get_email(message_id)
 
 
 @app.get("/api/v1/emails/{message_id}/thread")
-async def get_email_thread(
-    message_id: str,
-    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
-) -> dict[str, Any]:
+async def get_email_thread(message_id: str, account_id: str | None = Query(default=None, max_length=64),
+                           session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
-    bridge = _get_user_bridge(user)
-    email = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "get_email", {"message_id": message_id})
-    thread_id = email.get("thread_id") or email.get("threadId") if isinstance(email, dict) else None
-    if not thread_id:
+    gmail, _, _ = _get_hosted_gmail(user, account_id)
+    email = gmail.get_email(message_id)
+    if not email.get("thread_id"):
         raise HTTPException(502, "Email did not contain a thread identifier.")
-    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "get_thread", {"thread_id": thread_id})
-    return {"items": result if isinstance(result, list) else []}
+    return {"items": gmail.get_thread(email["thread_id"])}
 
 
 @app.get("/api/v1/labels")
-async def list_labels(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
+async def list_labels(account_id: str | None = Query(default=None, max_length=64),
+                      session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
-    bridge = _get_user_bridge(user)
-    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "list_labels")
-    return {"items": result if isinstance(result, list) else []}
+    gmail, _, _ = _get_hosted_gmail(user, account_id)
+    return {"items": gmail.list_labels()}
 
 
 @app.post("/api/v1/labels")
-async def create_label(
-    body: CreateLabelRequest,
-    request: Request,
-    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
-) -> dict[str, Any]:
+async def create_label(body: CreateLabelRequest, request: Request,
+                       account_id: str | None = Query(default=None, max_length=64),
+                       session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
     _require_csrf(request, user)
-    bridge = _get_user_bridge(user)
-    return await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "create_label", {"name": body.name.strip()})
+    gmail, _, _ = _get_hosted_gmail(user, account_id)
+    return gmail.create_label(body.name)
 
 
 @app.post("/api/v1/emails/{message_id}/labels")
-async def modify_email_labels(
-    message_id: str,
-    body: LabelModifyRequest,
-    request: Request,
-    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
-) -> dict[str, Any]:
+async def modify_email_labels(message_id: str, body: LabelModifyRequest, request: Request,
+                              account_id: str | None = Query(default=None, max_length=64),
+                              session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
     _require_csrf(request, user)
-    bridge = _get_user_bridge(user)
-    return await _bridge_request(
-        bridge["bridge_url"], bridge["bridge_secret"], "modify_labels",
-        {"message_id": message_id, "add_labels": body.add_labels, "remove_labels": body.remove_labels},
-    )
-
-
-async def _email_action(
-    message_id: str, action: str, confirmed: bool = False,
-    session: str | None = None,
-) -> dict[str, Any]:
-    user = _current_user(session)
-    bridge = _get_user_bridge(user)
-    params: dict[str, Any] = {"message_id": message_id}
-    if action == "trash":
-        if not confirmed:
-            raise HTTPException(400, "Confirm moving this email to Trash before continuing.")
-        params["confirmed"] = True
-    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], action, params)
-    return result if isinstance(result, dict) else {"ok": True, "result": result}
+    gmail, _, _ = _get_hosted_gmail(user, account_id)
+    return gmail.modify_labels(message_id, body.add_labels, body.remove_labels)
 
 
 @app.post("/api/v1/emails/{message_id}/archive")
-async def archive_email(
-    message_id: str, request: Request,
-    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
-) -> dict[str, Any]:
+async def archive_email(message_id: str, request: Request,
+                        account_id: str | None = Query(default=None, max_length=64),
+                        session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
     _require_csrf(request, user)
-    bridge = _get_user_bridge(user)
-    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "archive", {"message_id": message_id})
-    return result if isinstance(result, dict) else {"ok": True}
+    gmail, _, _ = _get_hosted_gmail(user, account_id)
+    return gmail.archive(message_id)
 
 
 @app.post("/api/v1/emails/{message_id}/trash")
-async def trash_email(
-    message_id: str, body: EmailActionRequest, request: Request,
-    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
-) -> dict[str, Any]:
+async def trash_email(message_id: str, body: EmailActionRequest, request: Request,
+                      account_id: str | None = Query(default=None, max_length=64),
+                      session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
     _require_csrf(request, user)
     if not body.confirm:
         raise HTTPException(400, "Confirm moving this email to Trash before continuing.")
-    bridge = _get_user_bridge(user)
-    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "trash", {"message_id": message_id, "confirmed": True})
-    return result if isinstance(result, dict) else {"ok": True}
+    gmail, _, _ = _get_hosted_gmail(user, account_id)
+    return gmail.trash(message_id)
 
 
 @app.post("/api/v1/emails/{message_id}/mark-read")
-async def mark_email_read(
-    message_id: str, request: Request,
-    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
-) -> dict[str, Any]:
+async def mark_email_read(message_id: str, request: Request,
+                          account_id: str | None = Query(default=None, max_length=64),
+                          session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
     _require_csrf(request, user)
-    bridge = _get_user_bridge(user)
-    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "mark_read", {"message_id": message_id})
-    return result if isinstance(result, dict) else {"ok": True}
+    gmail, _, _ = _get_hosted_gmail(user, account_id)
+    return gmail.mark_read(message_id)
 
 
 @app.post("/api/v1/emails/{message_id}/mark-unread")
-async def mark_email_unread(
-    message_id: str, request: Request,
-    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
-) -> dict[str, Any]:
+async def mark_email_unread(message_id: str, request: Request,
+                            account_id: str | None = Query(default=None, max_length=64),
+                            session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
     _require_csrf(request, user)
-    bridge = _get_user_bridge(user)
-    result = await _bridge_request(bridge["bridge_url"], bridge["bridge_secret"], "mark_unread", {"message_id": message_id})
-    return result if isinstance(result, dict) else {"ok": True}
+    gmail, _, _ = _get_hosted_gmail(user, account_id)
+    return gmail.mark_unread(message_id)
 
 
 @app.get("/api/v1/calendar/events")
@@ -1645,28 +1634,19 @@ def list_notifications(
 
 
 @app.post("/api/v1/sync")
-async def sync_mailbox(
-    body: dict[str, Any],
-    request: Request,
-    session: str | None = Cookie(default=None, alias=SESSION_COOKIE),
-) -> dict[str, Any]:
+async def sync_mailbox(body: dict[str, Any], request: Request,
+                       account_id: str | None = None,
+                       session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
     _require_csrf(request, user)
-    bridge = _get_user_bridge(user)
-    max_results = min(max(int(body.get("max_results", 10)), 1), 10)
+    gmail, _, selected_id = _get_hosted_gmail(user, account_id)
+    max_results = min(max(int(body.get("max_results", 25)), 1), 100)
     query = str(body.get("query") or "in:inbox newer_than:30d")[:500]
-    page_token = str(body.get("page_token") or "0")[:500]
-    result = await _bridge_request(
-        bridge["bridge_url"], bridge["bridge_secret"], "list_emails",
-        {"max_results": max_results, "query": query, "page_token": page_token},
-    )
-    if not isinstance(result, dict):
-        raise HTTPException(502, "Apps Script returned an invalid sync page.")
-    items = result.get("items") if isinstance(result.get("items"), list) else []
-    # This route currently fetches a bounded live page; no persistent message index or AI
-    # analysis is claimed. The response reports stored=0 until that index is implemented.
-    return {"fetched": len(items), "stored": 0, "analyzed": 0, "tasks_created": 0,
-            "errors": [], "next_page_token": result.get("next_page_token")}
+    page_token = str(body.get("page_token") or "")[:500] or None
+    result = gmail.list_emails(query=query, limit=max_results, page_token=page_token)
+    return {"fetched": len(result["items"]), "stored": 0, "analyzed": 0, "tasks_created": 0,
+            "errors": [], "next_page_token": result.get("next_page_token"),
+            "account_id": selected_id, "source": "gmail"}
 
 
 def _verified_task_candidate(candidate: dict[str, Any], email: dict[str, Any], item: dict[str, Any] | None = None) -> dict[str, Any] | None:
