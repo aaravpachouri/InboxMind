@@ -513,7 +513,7 @@ async def auth_status(session: str | None = Cookie(default=None, alias=SESSION_C
             "message": "Gmail connected directly through Google OAuth."}
 
 
-@app.get("/api/v1/auth/me")@app.get("/api/v1/auth/me")
+@app.get("/api/v1/auth/me")
 def auth_me(session: str | None = Cookie(default=None, alias=SESSION_COOKIE)) -> dict[str, Any]:
     user = _current_user(session)
     return {"authenticated": True, "email": user["email"], "display_name": user["display_name"],
@@ -766,7 +766,7 @@ async def mark_email_unread(message_id: str, request: Request,
     return gmail.mark_unread(message_id)
 
 
-@app.get("/api/v1/calendar/events")@app.get("/api/v1/calendar/events")
+@app.get("/api/v1/calendar/events")
 async def list_calendar_events(
     days: int = Query(default=14, ge=1, le=90),
     limit: int = Query(default=30, ge=1, le=50),
@@ -1647,7 +1647,7 @@ async def sync_mailbox(body: dict[str, Any], request: Request,
             "account_id": selected_id, "source": "gmail"}
 
 
-def _verified_task_candidatedef _verified_task_candidate(candidate: dict[str, Any], email: dict[str, Any], item: dict[str, Any] | None = None) -> dict[str, Any] | None:
+def _verified_task_candidate(candidate: dict[str, Any], email: dict[str, Any], item: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Accept only task proposals grounded in a verbatim quote from the source email."""
     title = re.sub(r"\s+", " ", str(candidate.get("title") or "")).strip()[:500]
     quote = re.sub(r"\s+", " ", str(candidate.get("evidence_quote") or "")).strip()[:500]
