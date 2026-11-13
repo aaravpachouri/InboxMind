@@ -42,12 +42,12 @@ def test_identity_login_requests_no_gmail_scopes() -> None:
     assert not any("gmail" in scope.lower() for scope in public_app.SCOPES)
 
 
-def test_email_endpoint_uses_tenant_scoped_direct_gmail_client() -> None:
+def test_email_endpoint_uses_apps_script_bridge_not_direct_gmail_api() -> None:
     source = inspect.getsource(public_app.list_emails)
-    assert "_get_hosted_gmail(user, account_id)" in source
-    assert "gmail.list_emails(" in source
-    assert '"source": "gmail"' in source
-    assert "_get_user_bridge(user)" not in source
+    assert '"list_emails"' in source
+    assert "_get_user_bridge(user)" in source
+    assert "googleapiclient" not in source
+    assert "Credentials(" not in source
 
 
 

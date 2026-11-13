@@ -150,8 +150,6 @@ def _get_hosted_gmail(user: dict[str, Any], account_id: str | None = None):
                 (user["id"],),
             ).fetchall()
     if not rows:
-        if account_id:
-            raise HTTPException(404, "Gmail account not found.")
         raise HTTPException(409, "Connect a Gmail account before opening the inbox.")
     if len(rows) > 1:
         raise HTTPException(409, "More than one Gmail account is connected. Select an account in Settings.")
