@@ -15,12 +15,13 @@ import {
 
 type View = 'overview' | 'analytics' | 'inbox' | 'priority' | 'tasks' | 'briefing' | 'assistant' | 'drafts' | 'calendar' | 'files' | 'business' | 'memory' | 'settings';
 type AuthStatus = { connected: boolean; email?: string | null; message?: string; scopes?: string[] };
+type AccountIdentity = { authenticated: boolean; email: string; display_name?: string | null; picture_url?: string | null };
 type Insights = {
   connected: boolean; last_sync?: string | null; email_count: number; unread_count: number;
   high_priority_count: number; open_tasks_count: number; overdue_tasks_count: number;
   category_counts?: Record<string, number>; recent_activity?: Array<Record<string, unknown>>; model_available?: boolean;
 };
-type ModelStatus = { available?: boolean; provider?: string; model?: string; installed_models?: string[]; detail?: string };
+type ModelStatus = { available?: boolean; ai_enabled?: boolean; provider?: string; model?: string; installed_models?: string[]; detail?: string; worker_online?: boolean; worker_registered?: boolean; device_name?: string; engine_mode?: 'hosted' | 'private_worker' };
 type CalendarEvent = { id: string; summary: string; description?: string; start?: string; end?: string; timezone?: string };
 type NotificationItem = { id: number; title?: string; message?: string; kind?: string; read_at?: string | null; created_at?: string };
 type MemoryItem = { id: number; category: string; key: string; value: string; created_at?: string; updated_at?: string };
@@ -73,11 +74,15 @@ export default function App() {
   const [busy, setBusy] = useState<string | null>(null);
   const [backendOnline, setBackendOnline] = useState(false);
   const [auth, setAuth] = useState<AuthStatus | null>(null);
+  const [sessionChecked, setSessionChecked] = useState(false);
+  const [accountAuthenticated, setAccountAuthenticated] = useState(false);
+  const [accountIdentity, setAccountIdentity] = useState<AccountIdentity | null>(null);
   const [authStatusUnavailable, setAuthStatusUnavailable] = useState(false);
   const [modelStatusUnavailable, setModelStatusUnavailable] = useState(false);
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
   const [insights, setInsights] = useState<Insights | null>(null);
   const [model, setModel] = useState<ModelStatus | null>(null);
+  const [workerToken, setWorkerToken] = useState<string | null>(null);
   const [emails, setEmails] = useState<EmailSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<EmailDetail | null>(null);
@@ -107,7 +112,7 @@ export default function App() {
   const [chatInput, setChatInput] = useState('');
   const [chatBusy, setChatBusy] = useState(false);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    { role: 'assistant', text: 'I’m your local-first email assistant. Ask me what needs attention, find a conversation, or turn an email into a practical next step.' },
+    { role: 'assistant', text: 'I’m your InboxMind AI assistant. I run securely on InboxMind’s hosted service. Ask what needs attention, find a conversation, or turn an email into a practical next step.' },
   ]);
   const [toast, setToast] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
   const [dialog, setDialog] = useState<DialogConfig | null>(null);
@@ -312,11 +317,23 @@ export default function App() {
   }, [gmailQuery, notify, loadEmails]);
 
   useEffect(() => {
-    // React StrictMode replays mount effects in development; do not launch duplicate live requests.
-    if (initialLoadStarted.current) return;
+    let active = true;
+    api<AccountIdentity>('/auth/me')
+      .then((identity) => { if (active) { setAccountIdentity(identity); setAccountAuthenticated(true); setSessionChecked(true); } })
+      .catch((error) => {
+        if (!active) return;
+        setAccountAuthenticated(false);
+        setSessionChecked(true);
+        if (!(error instanceof ApiError && error.status === 401)) notify(errorText(error), 'error');
+      });
+    return () => { active = false; };
+  }, [notify]);
+
+  useEffect(() => {
+    if (!sessionChecked || !accountAuthenticated || initialLoadStarted.current) return;
     initialLoadStarted.current = true;
     void loadCore(true);
-  }, [loadCore]);
+  }, [sessionChecked, accountAuthenticated, loadCore]);
 
   // Re-check runtime connections on tab focus and periodically. This prevents an app opened
   // before the Python server starts from staying falsely disconnected until a full reload.
@@ -488,7 +505,7 @@ export default function App() {
       } while (pageToken && pages < 3);
       await loadCore(false);
       const more = pageToken ? ' · more messages remain; sync again to continue' : '';
-      notify(`Sync complete · ${fetched} fetched, ${stored} indexed${more}.`, errors.length ? 'info' : 'success');
+      notify(`Sync complete · ${fetched} fetched, ${stored} indexed${stored === 0 ? ' (live-only; persistent email indexing is not enabled yet)' : ''}${more}.`, errors.length ? 'info' : 'success');
     } catch (error) { notify(errorText(error), 'error'); }
     finally { setBusy(null); }
   };
@@ -509,11 +526,12 @@ export default function App() {
     setBusy('analyze');
     try {
       const result = await api<{ analysis: Record<string, unknown>; tasks_created: number }>(`/emails/${encodeURIComponent(selectedId)}/analyze`, { method: 'POST', body: JSON.stringify({ force: true }) });
-      const updated = await api<EmailDetail>(`/emails/${encodeURIComponent(selectedId)}`);
-      setDetail(updated);
-      setEmails((prev) => prev.map((item) => item.id === selectedId ? { ...item, priority: String(result.analysis.priority || item.priority), category: String(result.analysis.category || item.category), ai_summary: String(result.analysis.summary || item.ai_summary) } : item));
+      setDetail((previous) => previous ? { ...previous, ai_analysis: result.analysis, ai_summary: String(result.analysis.summary || previous.ai_summary || '') } : previous);
+      setEmails((previous) => previous.map((item) => item.id === selectedId
+        ? { ...item, priority: String(result.analysis.priority || item.priority), category: String(result.analysis.category || item.category), ai_summary: String(result.analysis.summary || item.ai_summary) }
+        : item));
       await loadTasks();
-      notify(`Analysis complete via ${String(result.analysis.provider || model?.provider || 'local AI')}. ${result.tasks_created || 0} new tasks added.`);
+      notify(`Analysis complete via ${String(result.analysis.provider || model?.provider || 'local AI')}.${' '}${result.tasks_created || 0} new tasks added.`);
     } catch (error) { notify(errorText(error), 'error'); }
     finally { setBusy(null); }
   };
@@ -543,6 +561,37 @@ export default function App() {
   };
 
   const confirmAndAct = (config: DialogConfig) => setDialog(config);
+
+  const registerLocalWorker = async () => {
+    setBusy('worker-register');
+    try {
+      const result = await api<{ token: string; registered: boolean }>('/ai/workers/register', {
+        method: 'POST', body: JSON.stringify({ device_name: 'Windows PC' }),
+      });
+      setWorkerToken(result.token);
+      const status = await api<ModelStatus>('/system/model');
+      setModel(status);
+      setModelStatusUnavailable(false);
+      notify('This PC is registered. Copy the one-time token into the Windows worker setup.');
+    } catch (error) { notify(errorText(error), 'error'); }
+    finally { setBusy(null); }
+  };
+
+  const revokeLocalWorker = () => confirmAndAct({
+    title: 'Revoke this private AI worker?',
+    description: 'The saved worker token will stop working immediately. You can register this PC again later.',
+    confirmLabel: 'Revoke worker', danger: true,
+    onConfirm: async () => {
+      setBusy('worker-revoke');
+      try {
+        await api('/ai/workers/revoke', { method: 'POST', body: JSON.stringify({ confirm: true }) });
+        setWorkerToken(null);
+        setModel(await api<ModelStatus>('/system/model'));
+        notify('The local AI worker token has been revoked.');
+      } catch (error) { notify(errorText(error), 'error'); }
+      finally { setBusy(null); }
+    },
+  });
 
   const archiveEmail = (item: EmailSummary) => confirmAndAct({
     title: 'Archive this conversation?', description: `“${item.subject}” will leave your Inbox but remain searchable in Gmail.`, confirmLabel: 'Archive email',
@@ -734,17 +783,22 @@ export default function App() {
 
     setBusy(isReply ? 'draft-reply' : 'ai-new-draft');
     try {
-      // Preflight the local model before any endpoint can create a draft. This avoids
-      // silently producing a heuristic/fallback draft when the user explicitly chose local AI.
-      const cachedModelReady = Boolean(model?.available && ['ollama', 'local'].includes((model.provider || '').toLowerCase()));
-      const modelCheck = cachedModelReady ? model as ModelStatus : await api<ModelStatus>('/system/model');
-      const modelProvider = (modelCheck.provider || '').toLowerCase();
-      if (!modelCheck.available || !['ollama', 'local'].includes(modelProvider)) {
+      // The backend is authoritative for provider selection and readiness.
+      // Do not block hosted Gemini drafts using stale/local-worker UI state; the
+      // draft endpoint performs its own AI-enabled and provider checks and never
+      // saves a fabricated result.
+      try {
+        const modelCheck = await api<ModelStatus>('/system/model');
         setModel(modelCheck);
-        throw new Error(`Local Ollama is not ready${modelCheck.detail ? `: ${modelCheck.detail}` : '.'} Start the configured model and retry; no new draft was requested.`);
+        setModelStatusUnavailable(false);
+        if (modelCheck.ai_enabled === false) {
+          throw new Error('AI is disabled in Settings. Enable AI to generate a reply draft.');
+        }
+      } catch (statusError) {
+        if (statusError instanceof ApiError && statusError.status === 403) throw statusError;
+        // Continue to the actual draft endpoint: it provides the definitive provider error.
+        setModelStatusUnavailable(true);
       }
-      setModel(modelCheck);
-      setModelStatusUnavailable(false);
       if (saveWritingDefaults) await persistWritingProfile();
 
       let result: DraftItem;
@@ -753,12 +807,12 @@ export default function App() {
           method: 'POST', body: JSON.stringify({ instruction, create_in_gmail: true }),
         });
         const provider = (created.ai_provider || '').toLowerCase();
-        if (!['ollama', 'local'].includes(provider)) {
+        if (!['ollama', 'local', 'gemini'].includes(provider)) {
           // The backend has already saved a draft, so keep it visible but block sending until
           // a genuine local-model draft can be generated. Never mislabel heuristic output as AI.
           result = {
             ...created,
-            warning: `This draft used ${created.ai_provider || 'an unverified fallback'} rather than local Ollama. Regenerate after the local model is ready; do not send this draft.`,
+            warning: `This draft used ${created.ai_provider || 'an unverified fallback'} rather than a verified AI provider. Review the provider status before using this draft.`,
           };
         } else {
           const finalBody = appendIdentityBlock(created.body_text || '');
@@ -793,8 +847,8 @@ export default function App() {
           method: 'POST', body: JSON.stringify({ message: newEmailPrompt, include_recent_emails: false }),
         });
         if (!generated.answer?.trim()) throw new Error('The AI returned an empty draft. Try a more specific brief.');
-        if (!generated.ai_provider || !['ollama', 'local'].includes(generated.ai_provider.toLowerCase())) {
-          throw new Error(`A verified local AI response was not available${generated.ai_provider ? ` (provider: ${generated.ai_provider})` : ''}. Check Ollama and try again; no placeholder draft was saved.`);
+        if (!generated.ai_provider || !['ollama', 'local', 'gemini'].includes(generated.ai_provider.toLowerCase())) {
+          throw new Error(`A verified AI response was not available${generated.ai_provider ? ` (provider: ${generated.ai_provider})` : ''}. Check the configured AI provider and try again; no placeholder draft was saved.`);
         }
         const bodyText = appendIdentityBlock(generated.answer);
         if (bodyText.length < 12) throw new Error('The AI draft was too short to save. Add more context and try again.');
@@ -804,7 +858,7 @@ export default function App() {
             source_email_id: null, create_in_gmail: true,
           }),
         });
-        result = { ...result, ai_provider: generated.ai_provider || 'ollama' };
+        result = { ...result, ai_provider: generated.ai_provider || 'AI' };
       }
 
       setDrafts((previous) => [result, ...previous.filter((item) => item.id !== result.id)]);
@@ -985,11 +1039,14 @@ export default function App() {
     finally { setBusy(null); }
   };
 
-  const openLogin = async () => {
-    setBusy('login');
-    try { const result = await api<{ authorization_url: string }>('/auth/google/login'); window.open(result.authorization_url, '_blank', 'noopener,noreferrer'); notify('Finish Google authorization in the new tab, then refresh the workspace.', 'info'); }
-    catch (error) { notify(errorText(error), 'error'); }
-    finally { setBusy(null); }
+  const openGmailConnect = () => {
+    window.location.assign(`${API_BASE}/gmail/oauth/start`);
+  };
+
+  const openLogin = () => {
+    // OAuth must be a top-level navigation so the same-origin Vercel API proxy can
+    // set the session cookie before Google redirects back to the application.
+    window.location.assign(`${API_BASE}/auth/google/login`);
   };
 
   const currentTitle = NAV.find((item) => item.id === view)?.label || 'Overview';
@@ -1000,6 +1057,12 @@ export default function App() {
     { label: 'New task', detail: 'Add a personal commitment', icon: Plus, group: 'Actions', action: () => setTaskModalOpen(true) },
     { label: 'Write an email with AI', detail: 'Generate a draft from a brief and your saved writing style', icon: WandSparkles, group: 'Actions', action: () => openWritingStudio('new') },
   ];
+
+  if (!sessionChecked) return <AccountAccess checking />;
+  if (!accountAuthenticated) return <AccountAccess onAuthenticated={() => {
+    setAccountAuthenticated(true);
+    setSessionChecked(true);
+  }} />;
 
   return (
     <div className={cx('app-shell', !sidebarOpen && 'sidebar-collapsed')}>
@@ -1041,8 +1104,8 @@ export default function App() {
           </div>
         </nav>
         {sidebarOpen && <div className="sidebar-bottom">
-          <div className="local-card"><div className="local-card-icon"><ShieldCheck size={17} /></div><div><strong>Private by default</strong><p>AI runs on this device.</p></div><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /></div>
-          <button className="account-row" onClick={() => go('settings')}><div className="account-avatar">{initialsFromAccount(auth?.email)}</div><div className="account-copy"><strong>{auth?.email ? auth.email.split('@')[0] : 'Local workspace'}</strong><span>{!backendOnline ? (loading ? 'Checking connection…' : 'Backend unavailable') : authStatusUnavailable ? 'Gmail status unavailable' : auth?.connected ? 'Gmail connected' : auth ? 'Connect Gmail' : 'Checking Gmail…'}</span></div><MoreHorizontal size={17} /></button>
+          <div className="local-card"><div className="local-card-icon"><ShieldCheck size={17} /></div><div><strong>Private by default</strong><p>AI runs on InboxMind servers.</p></div><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /></div>
+          <button className="account-row" onClick={() => go('settings')}><div className="account-avatar">{initialsFromAccount(accountIdentity?.email)}</div><div className="account-copy"><strong>{accountIdentity?.display_name || accountIdentity?.email || 'InboxMind account'}</strong><span>{!backendOnline ? (loading ? 'Checking connection…' : 'Backend unavailable') : authStatusUnavailable ? 'Gmail status unavailable' : auth?.connected ? 'Gmail connected' : 'Connect Gmail'}</span></div><MoreHorizontal size={17} /></button>
           <div className="sidebar-footnote">AI WRITER <span>·</span> v7.0</div>
         </div>}
       </aside>
@@ -1066,7 +1129,7 @@ export default function App() {
 
         {!backendOnline && !loading && <div className="connection-banner error-banner"><CircleAlert size={17} /><div><strong>Backend unavailable</strong><span>Start the Python API at <code>127.0.0.1:8000</code>, then refresh this page.</span></div><button className="text-button" onClick={() => void refreshAll()}>Retry</button></div>}
         {backendOnline && authStatusUnavailable && <div className="connection-banner status-warning-banner"><CircleAlert size={17} /><div><strong>Gmail status couldn't be verified</strong><span>The backend is responding, but its auth-status check failed. Retry before reconnecting so we don't mislabel a connected account.</span></div><button className="text-button" onClick={() => void refreshAll()}>Retry status</button></div>}
-        {backendOnline && !authStatusUnavailable && auth && !auth.connected && <div className="connection-banner"><Mail size={17} /><div><strong>Connect your Gmail account</strong><span>{auth.message || 'Connect Gmail to populate your inbox with live messages.'}</span></div><button className="small-primary" onClick={() => void openLogin()}>Connect Gmail <ExternalLink size={13} /></button></div>}
+        {backendOnline && !authStatusUnavailable && auth && !auth.connected && <div className="connection-banner"><Mail size={17} /><div><strong>Connect your Gmail account</strong><span>{auth?.message || 'Authorize InboxMind to access your mailbox directly through Google OAuth.'}</span></div><button className="small-primary" onClick={() => window.location.assign(`${API_BASE}/gmail/oauth/start`)}>Connect Gmail</button></div>}
 
         <div className="page-content">
           {view === 'analytics' && <BusinessAnalyticsView
@@ -1087,6 +1150,19 @@ export default function App() {
             mailboxLoading={mailboxLoading} mailboxError={mailboxError} onReloadInbox={() => { void loadEmails(gmailQuery, null, auth?.connected); }} onCompose={() => openWritingStudio('new')}
             onOpenEmail={selectEmail} onNavigate={go} onSync={runSync} syncBusy={busy === 'sync'} onRefreshAll={() => { void refreshAll(); }} refreshBusy={busy === 'refresh'} onRefreshBriefing={async () => {
               setBusy('briefing'); try { setBriefing(await api<Briefing>('/briefing/daily?hours=24')); notify('Briefing refreshed.'); } catch (error) { notify(errorText(error), 'error'); } finally { setBusy(null); }
+            }} onCreateProposedTask={async (proposal) => {
+              setBusy('create-task');
+              try {
+                const created = await api<TaskItem>('/tasks', { method: 'POST', body: JSON.stringify({
+                  title: proposal.title,
+                  description: [proposal.description, proposal.evidence_quote ? 'Evidence: ' + proposal.evidence_quote : '', proposal.source_subject ? 'Source email: ' + proposal.source_subject : ''].filter(Boolean).join('\n'),
+                  priority: proposal.priority || 'medium', due_date: proposal.due_date || null, source_email_id: proposal.source_email_id,
+                }) });
+                setTasks((current) => [created, ...current]);
+                setBriefing((current) => current ? { ...current, proposed_tasks: (current.proposed_tasks || []).filter((item) => !(item.source_email_id === proposal.source_email_id && item.title === proposal.title)) } : current);
+                notify('Task approved and added.');
+              } catch (error) { notify(errorText(error), 'error'); }
+              finally { setBusy(null); }
             }} briefingBusy={busy === 'briefing'} />}
           {(view === 'inbox' || view === 'priority') && <InboxView
             view={view} emails={filteredEmails} totalEstimate={totalEstimate} source={mailSource} mailFilter={mailFilter} setMailFilter={setMailFilter}
@@ -1103,7 +1179,7 @@ export default function App() {
           {view === 'files' && <FilesView fileSearch={fileSearch} setFileSearch={setFileSearch} results={fileResults} indexStats={indexStats} busy={busy} onSearch={searchLocalFiles} onIndex={indexLocalFiles} />}
           {view === 'business' && <BusinessProfileView memories={memories} busy={busy} onSave={saveMemory} onRefresh={refreshMemories} />}
           {view === 'memory' && <MemoryView memories={memories} feedbackItems={feedbackItems} busy={busy} onSaveMemory={saveMemory} onDeleteMemory={deleteMemory} onSubmitFeedback={submitFeedback} />}
-          {view === 'settings' && <SettingsView auth={auth} health={health} model={model} settings={settings} busy={busy} authStatusUnavailable={authStatusUnavailable} modelStatusUnavailable={modelStatusUnavailable} onConnect={openLogin} onRefresh={refreshAll} onUpdate={updateSetting} />}
+          {view === 'settings' && <SettingsView auth={auth} health={health} model={model} settings={settings} busy={busy} authStatusUnavailable={authStatusUnavailable} modelStatusUnavailable={modelStatusUnavailable} workerToken={workerToken} onConnect={openGmailConnect} onRefresh={refreshAll} onUpdate={updateSetting} onRegisterWorker={registerLocalWorker} onRevokeWorker={revokeLocalWorker} />}
         </div>
 
         <footer className="app-footer"><span><span className={cx('status-dot', backendOnline ? 'green' : 'red')} /> {backendOnline ? 'Local backend connected' : 'Backend offline'}</span><span><ShieldCheck size={13} /> Local-first · no paid AI APIs</span><span>API <code>{API_BASE.replace('/api/v1', '')}</code></span></footer>
@@ -1156,7 +1232,7 @@ export default function App() {
             <div className="writing-profile-footer"><label className="save-writing-defaults"><input type="checkbox" checked={saveWritingDefaults} onChange={(event) => setSaveWritingDefaults(event.target.checked)} /> Save these as my default writing profile</label><button type="button" className="button-secondary small" onClick={handleSaveWritingProfile} disabled={busy === 'writing-profile'}>{busy === 'writing-profile' ? <LoaderCircle size={13} className="spin" /> : <Check size={13} />} Save profile</button></div>
           </details>
           <details className="reply-avoid-details"><summary>Anything to avoid? <span>Optional</span></summary><input value={replyAvoid} onChange={(event) => setReplyAvoid(event.target.value)} maxLength={400} placeholder="e.g. Don’t promise a date, mention pricing, or sound too formal" /></details>
-          <div className="reply-speed-note"><Sparkles size={15} /><span>Uses your local Ollama model. The saved example guides tone and structure; its facts are not instructions. The app appends your identity block. A draft is created for review—never sent automatically.</span><span className="reply-char-count">{replyDetails.length}/1800</span></div>
+          <div className="reply-speed-note"><Sparkles size={15} /><span>Uses your configured AI provider. The saved example guides tone and structure; its facts are not instructions. The app appends your identity block. A draft is created for review—never sent automatically.</span><span className="reply-char-count">{replyDetails.length}/1800</span></div>
           <div className="modal-actions"><button type="button" className="button-secondary" onClick={() => setWritingStudioOpen(false)}>Cancel</button><button className="button-primary reply-generate-button" disabled={busy === 'draft-reply' || busy === 'ai-new-draft' || busy === 'writing-profile'}>{busy === 'draft-reply' || busy === 'ai-new-draft' ? <><LoaderCircle size={15} className="spin" /> Writing your email…</> : <><WandSparkles size={15} /> {writingMode === 'reply' ? 'Create reply draft' : 'Generate email draft'} <ArrowRight size={14} /></>}</button></div>
         </form>
       </Modal>}
@@ -1209,9 +1285,9 @@ function PriorityBadge({ value }: { value?: string }) {
 function LoadingLine({ label = 'Loading your workspace…' }: { label?: string }) { return <div className="loading-state"><LoaderCircle size={19} className="spin" /><span>{label}</span></div>; }
 function EmptyState({ icon: Icon = Inbox, title, detail, action }: { icon?: typeof Inbox; title: string; detail: string; action?: ReactNode }) { return <div className="empty-state"><div className="empty-icon"><Icon size={22} /></div><strong>{title}</strong><p>{detail}</p>{action}</div>; }
 
-function OverviewView({ auth, insights, model, briefing, emails, mailSource, tasks, calendarEvents, backendOnline, loading, authStatusUnavailable, modelStatusUnavailable, mailboxLoading, mailboxError, onReloadInbox, onCompose, onOpenEmail, onNavigate, onSync, syncBusy, onRefreshAll, refreshBusy, onRefreshBriefing, briefingBusy }: {
+function OverviewView({ auth, insights, model, briefing, emails, mailSource, tasks, calendarEvents, backendOnline, loading, authStatusUnavailable, modelStatusUnavailable, mailboxLoading, mailboxError, onReloadInbox, onCompose, onOpenEmail, onNavigate, onSync, syncBusy, onRefreshAll, refreshBusy, onRefreshBriefing, onCreateProposedTask, briefingBusy }: {
   auth: AuthStatus | null; insights: Insights | null; model: ModelStatus | null; briefing: Briefing | null; emails: EmailSummary[]; mailSource: 'gmail' | 'cache' | null; tasks: TaskItem[]; calendarEvents: CalendarEvent[]; backendOnline: boolean; loading: boolean; authStatusUnavailable: boolean; modelStatusUnavailable: boolean; mailboxLoading: boolean; mailboxError: string | null;
-  onReloadInbox: () => void; onCompose: () => void; onOpenEmail: (item: EmailSummary) => void; onNavigate: (view: View) => void; onSync: () => void; syncBusy: boolean; onRefreshAll: () => void; refreshBusy: boolean; onRefreshBriefing: () => void; briefingBusy: boolean;
+  onReloadInbox: () => void; onCompose: () => void; onOpenEmail: (item: EmailSummary) => void; onNavigate: (view: View) => void; onSync: () => void; syncBusy: boolean; onRefreshAll: () => void; refreshBusy: boolean; onRefreshBriefing: () => void; onCreateProposedTask: (proposal: NonNullable<Briefing['proposed_tasks']>[number]) => void; briefingBusy: boolean;
 }) {
   const priority = emails.filter((item) => ['urgent', 'high'].includes((item.priority || '').toLowerCase()));
   const glanceEmails = [...priority, ...emails.filter((item) => !priority.some((urgent) => urgent.id === item.id))].slice(0, 5);
@@ -1243,7 +1319,7 @@ function OverviewView({ auth, insights, model, briefing, emails, mailSource, tas
           {!backendOnline ? (loading ? 'Checking backend' : 'Backend offline') : authStatusUnavailable ? 'Gmail status unknown' : auth?.connected ? 'Gmail connected' : 'Gmail not connected'}
           <span className="hero-proof-separator">·</span>
           <span className={cx('status-dot', model?.available ? 'green' : 'amber')} />
-          {model?.available ? 'Local AI ready' : modelStatusUnavailable ? 'AI status unknown' : model ? 'Local fallback' : 'Checking AI'}
+          {model?.available ? 'Ollama ready' : modelStatusUnavailable ? 'AI status unknown' : model ? 'Ollama unavailable' : 'Checking AI'}
           <span className="hero-proof-separator">·</span>Private by default
         </div>
       </div>
@@ -1296,16 +1372,28 @@ function OverviewView({ auth, insights, model, briefing, emails, mailSource, tas
           <div><span className="quick-panel-kicker">YOUR DAY, DISTILLED</span><h2>Daily briefing</h2><p>The complete picture from your recent messages and open commitments.</p></div>
           <span className={cx('quick-agenda-status', briefing?.summary ? 'is-ready' : 'is-pending')}><i />{briefing?.summary ? 'Ready' : 'Preparing'}</span>
         </div>
-        <div className="quick-full-briefing-meta"><span className="quick-provider"><span className={cx('status-dot', briefing?.provider === 'ollama' ? 'green' : 'amber')} /> {briefing?.provider || 'Local assistant'}{briefing?.generated_at ? ` · ${formatDate(briefing.generated_at)}` : ''}</span><span className="quick-full-briefing-period">LAST {briefing?.period_hours || 24} HOURS</span></div>
-        <div className="quick-full-briefing-copy">
-          {briefing?.summary ? <BriefingText text={briefing.summary} /> : <p className="quick-briefing-placeholder">{backendOnline ? 'Your full daily briefing is being prepared from the local inbox index. It will appear here when the analysis finishes.' : 'Start the local backend to prepare your daily briefing.'}</p>}
+        <div className="quick-full-briefing-meta"><span className="quick-provider"><span className={cx('status-dot', briefing?.provider ? 'green' : 'amber')} /> {briefing?.provider || 'Local assistant'}{briefing?.generated_at ? ` · Updated ${formatDate(briefing.generated_at)}` : ''}</span><span className="quick-full-briefing-period">LAST {briefing?.period_hours || 24} HOURS</span></div>
+        <div className="quick-briefing-metric-grid" aria-label="Briefing metrics">
+          <div className="quick-briefing-metric"><span>Messages</span><strong>{briefing?.counts?.emails_indexed_in_period ?? '—'}</strong></div>
+          <div className="quick-briefing-metric"><span>Unread</span><strong>{briefing?.counts?.unread_in_period ?? '—'}</strong></div>
+          <div className="quick-briefing-metric is-priority"><span>Priority</span><strong>{briefing?.counts?.urgent_or_high ?? '—'}</strong></div>
+          <div className="quick-briefing-metric"><span>Open tasks</span><strong>{briefing?.counts?.open_tasks ?? tasks.length}</strong></div>
+          <div className={cx('quick-briefing-metric', (briefing?.counts?.overdue_tasks ?? 0) > 0 && 'is-overdue')}><span>Overdue</span><strong>{briefing?.counts?.overdue_tasks ?? 0}</strong></div>
         </div>
-        {briefing?.counts && <div className="quick-briefing-counts"><span><strong>{briefing.counts.emails_indexed_in_period ?? '—'}</strong> messages</span><span><strong>{briefing.counts.unread_in_period ?? '—'}</strong> unread</span><span><strong>{briefing.counts.urgent_or_high ?? '—'}</strong> priority</span><span><strong>{briefing.counts.open_tasks ?? tasks.length}</strong> open tasks</span><span><strong>{briefing.counts.overdue_tasks ?? 0}</strong> overdue</span></div>}
+        <section className="quick-full-briefing-copy">
+          <div className="quick-briefing-section-label"><Sparkles size={13} /> AI OVERVIEW</div>
+          {briefing?.summary ? <BriefingText text={briefing.summary} /> : <p className="quick-briefing-placeholder">{backendOnline ? 'Your full daily briefing is being prepared from the local inbox index. It will appear here when the analysis finishes.' : 'Start the local backend to prepare your daily briefing.'}</p>}
+        </section>
+        {briefing?.coverage && <p className="quick-briefing-coverage">AI analysed {briefing.coverage.emails_analyzed ?? 0} of {briefing.coverage.emails_fetched ?? 0} fetched messages{briefing.coverage.truncated ? ' · partial review, more messages remain' : ''}.</p>}
+        {briefing && (briefing.sections?.unread_needing_action?.length || briefing.sections?.other_actions?.length) ? <div className="quick-briefing-detail-grid">
+          {(briefing.sections?.unread_needing_action ?? []).length > 0 && <section className="quick-briefing-detail-group"><h3><Mail size={13} /> Unread · action needed <span>{briefing.sections.unread_needing_action!.length}</span></h3>{briefing.sections.unread_needing_action!.slice(0, 3).map((item) => <button className="quick-brief-email" key={item.id} onClick={() => onOpenEmail(item)}><span><strong>{item.subject || '(no subject)'}</strong><small>{senderName(item.from_address)}</small></span><PriorityBadge value={item.priority} /></button>)}</section>}
+          {(briefing.sections?.other_actions ?? []).length > 0 && <section className="quick-briefing-detail-group"><h3><CheckCircle2 size={13} /> Other requested actions <span>{briefing.sections.other_actions!.length}</span></h3>{briefing.sections.other_actions!.slice(0, 3).map((item) => <button className="quick-brief-email" key={item.id} onClick={() => onOpenEmail(item)}><span><strong>{item.subject || '(no subject)'}</strong><small>{senderName(item.from_address)}</small></span><PriorityBadge value={item.priority} /></button>)}</section>}
+        </div> : null}
         {(Boolean(briefing?.important_emails?.length) || Boolean(briefing?.tasks_due_today_or_overdue?.length)) && <div className="quick-briefing-detail-grid">
-          {Boolean(briefing?.important_emails?.length) && <section className="quick-briefing-detail-group"><h3><Flag size={13} /> Priority conversations</h3>{briefing!.important_emails!.slice(0, 5).map((item) => <button className="quick-brief-email" key={item.id} onClick={() => onOpenEmail(item)}><span><strong>{item.subject || '(no subject)'}</strong><small>{senderName(item.from_address)}</small></span><PriorityBadge value={item.priority} /></button>)}</section>}
-          {Boolean(briefing?.tasks_due_today_or_overdue?.length) && <section className="quick-briefing-detail-group"><h3><Clock3 size={13} /> Due today or overdue</h3>{briefing!.tasks_due_today_or_overdue!.slice(0, 5).map((task) => <div className="quick-brief-task" key={task.id}><span><strong>{task.title}</strong><small>{task.due_date ? `Due ${formatDate(task.due_date, 'date')}` : 'Date not set'}</small></span><PriorityBadge value={task.priority} /></div>)}</section>}
+          {Boolean(briefing?.important_emails?.length) && <section className="quick-briefing-detail-group"><h3><Flag size={13} /> Needs your attention <span>{briefing!.important_emails!.length}</span></h3>{briefing!.important_emails!.slice(0, 5).map((item) => <button className="quick-brief-email" key={item.id} onClick={() => onOpenEmail(item)}><span><strong>{item.subject || '(no subject)'}</strong><small>{senderName(item.from_address)}</small></span><PriorityBadge value={item.priority} /></button>)}</section>}
+          {Boolean(briefing?.tasks_due_today_or_overdue?.length) && <section className="quick-briefing-detail-group"><h3><Clock3 size={13} /> Due today or overdue <span>{briefing!.tasks_due_today_or_overdue!.length}</span></h3>{briefing!.tasks_due_today_or_overdue!.slice(0, 5).map((task) => <div className="quick-brief-task" key={task.id}><span><strong>{task.title}</strong><small>{task.due_date ? `Due ${formatDate(task.due_date, 'date')}` : 'Date not set'}</small></span><PriorityBadge value={task.priority} /></div>)}</section>}
         </div>}
-        {briefing?.next_steps?.length ? <section className="quick-briefing-next-steps"><h3>Suggested next steps</h3><ol>{briefing.next_steps.map((step, index) => <li key={`${index}-${step}`}>{step}</li>)}</ol></section> : null}
+        {briefing?.next_steps?.length ? <section className="quick-briefing-next-steps"><h3><CheckCircle2 size={13} /> Suggested next steps</h3><ol>{briefing.next_steps.map((step, index) => <li key={`${index}-${step}`}>{step}</li>)}</ol></section> : null}
         <div className="quick-agenda-actions"><button className="button-secondary small" onClick={() => onNavigate('briefing')}>Open full briefing <ArrowRight size={13} /></button><button className="button-primary small" onClick={onRefreshBriefing} disabled={briefingBusy}>{briefingBusy ? <LoaderCircle size={13} className="spin" /> : <RefreshCw size={13} />} Refresh brief</button></div>
       </article>
 
@@ -1314,7 +1402,8 @@ function OverviewView({ auth, insights, model, briefing, emails, mailSource, tas
         <p className="quick-plan-intro">A short list of the commitments waiting for your attention.</p>
         <div className="quick-plan-divider" />
         <div className="quick-next-head"><strong>Next up</strong><button onClick={() => onNavigate('tasks')}>All tasks <ArrowRight size={13} /></button></div>
-        {nextTasks.length ? <div className="quick-next-list">{nextTasks.map((task) => <button key={task.id} className="quick-next-task" onClick={() => onNavigate('tasks')}><span className="quick-task-ring"><Circle size={15} /></span><span><strong>{task.title}</strong><small>{task.due_date ? `Due ${formatDate(task.due_date, 'date')}` : 'No due date'}</small></span><PriorityBadge value={task.priority} /></button>)}</div> : <div className="quick-task-empty"><CheckCheck size={16} /><span>Nothing pressing. Any new commitments will appear here.</span></div>}
+        {nextTasks.length ? <div className="quick-next-list">{nextTasks.map((task) => <button key={task.id} className="quick-next-task" onClick={() => onNavigate('tasks')}><span className="quick-task-ring"><Circle size={15} /></span><span><strong>{task.title}</strong><small>{task.due_date ? `Due ${formatDate(task.due_date, 'date')}` : 'No due date'}</small></span><PriorityBadge value={task.priority} /></button>)}</div> : <div className="quick-task-empty"><CheckCheck size={16} /><span>No saved tasks yet. AI suggestions will appear below for your review.</span></div>}
+        {briefing?.proposed_tasks?.length ? <div className="quick-proposed-tasks"><div className="quick-proposed-heading"><Sparkles size={13} /><strong>Possible tasks from email</strong><span>{briefing.proposed_tasks.length}</span></div>{briefing.proposed_tasks.slice(0, 3).map((proposal, index) => <div className="quick-proposed-task" key={proposal.source_email_id + proposal.title + index}><div><strong>{proposal.title}</strong><small>{proposal.source_subject} · {Math.round(proposal.confidence * 100)}% confidence</small><q>{proposal.evidence_quote}</q></div><button className="quick-proposed-approve" onClick={() => onCreateProposedTask(proposal)} disabled={false} title="Approve and add to your task list"><Check size={14} /> Add</button></div>)}</div> : null}
         <div className="quick-plan-actions"><button className="quick-panel-link" onClick={() => onNavigate('tasks')}>Review tasks <ArrowRight size={14} /></button><button className="quick-panel-link" onClick={() => onNavigate('assistant')}>Ask inboxmind <ArrowRight size={14} /></button></div>
       </aside>
     </section>
@@ -1484,7 +1573,7 @@ function InboxView({ view, emails, totalEstimate, source, mailFilter, setMailFil
           <div className="email-detail-toolbar"><div className="detail-toolbar-label"><span className={cx('status-dot', detail.is_unread ? 'blue' : 'green')} />{detail.is_unread ? 'Unread message' : 'Message details'}</div><button className="button-primary email-detail-reply-cta" onClick={onDraftReply} disabled={busy === 'draft-reply'}>{busy === 'draft-reply' ? <LoaderCircle size={14} className="spin" /> : <WandSparkles size={14} />} Reply with AI</button><div className="toolbar-icon-group"><button className="icon-btn subtle" title="Refresh from Gmail" onClick={onRefreshEmail} disabled={busy === 'refresh-email'}><RefreshCw size={15} /></button><button className="icon-btn subtle" title={detail.is_unread ? 'Mark as read' : 'Mark as unread'} onClick={() => onMarkRead(detail, Boolean(detail.is_unread))}><MailCheck size={15} /></button><button className="icon-btn subtle" title="Archive" onClick={() => onArchive(detail)}><Archive size={15} /></button><button className="icon-btn subtle danger-icon" title="Move to Trash" onClick={() => onTrash(detail)}><Trash2 size={15} /></button></div></div>
           <div className="email-detail-scroll"><div className="email-detail-subject"><div className="subject-kickers">{detail.is_sent && <Badge value="Sent by you" kind="lilac" />}{detail.labels?.includes('STARRED') && <Badge value="Starred" kind="amber" />}{detail.has_attachments && <Badge value="Has attachments" kind="blue" />}</div><h2>{detail.subject || '(no subject)'}</h2><div className="detail-labels">{detail.labels?.filter((label) => ['INBOX', 'UNREAD', 'IMPORTANT', 'STARRED'].includes(label)).map((label) => <span key={label}>{label.toLowerCase()}</span>)}</div></div>
             <div className="sender-block"><Avatar name={detail.from_address} /><div className="sender-block-copy"><strong>{senderName(detail.from_address)}</strong><span>{detail.from_address}</span><small>To {detail.to_addresses || 'you'}{detail.cc_addresses ? ` · Cc ${detail.cc_addresses}` : ''}</small></div><time>{formatDate(detail.internal_date, 'date')}</time></div>
-            <div className="email-body"><div className="email-body-toggle"><span>Message</span><button onClick={() => setShowFullBody((value) => !value)}>{showFullBody ? 'Collapse' : 'Expand'} <ChevronDown size={13} /></button></div>{showFullBody ? <pre>{detail.body_text?.trim() || detail.snippet || 'No plain-text body available for this message.'}</pre> : <p className="body-collapsed">{(detail.body_text || detail.snippet || '').slice(0, 320)}…</p>}</div>
+            <div className="email-body"><div className="email-body-toggle"><span>Message</span><button onClick={() => setShowFullBody((value) => !value)}>{showFullBody ? 'Collapse' : 'Expand'} <ChevronDown size={13} /></button></div>{showFullBody ? <pre>{detail.body_text?.trim() || detail.snippet || 'No readable body is available for this message.'}</pre> : <p className="body-collapsed">{(detail.body_text || detail.snippet || '').slice(0, 320)}…</p>}{detail.body_truncated && <p className="setting-footnote">This message exceeds the bridge's 500,000-character safety limit. The displayed body may be incomplete.</p>}</div>
             {detail.attachment_metadata && detail.attachment_metadata.length > 0 && <div className="attachments-block"><h3><Paperclip size={15} /> Attachments</h3>{detail.attachment_metadata.map((attachment) => <div className="attachment-item" key={attachment.attachment_id}><div className="attachment-icon"><FileSearch size={16} /></div><div><strong>{attachment.filename}</strong><span>{attachment.mime_type || 'File'} · {formatBytes(attachment.size || 0)}</span></div><span className="attachment-note">Review in API</span></div>)}</div>}
             <div className="ai-insight-block"><div className="ai-insight-heading"><div className="ai-title-icon"><Sparkles size={16} /></div><div><strong>AI insight</strong><span>Local analysis · {String(detail.ai_analysis?.provider || modelProvider(detail))}</span></div><button className="icon-btn subtle" title="Analyze with local AI" onClick={onAnalyze} disabled={busy === 'analyze'}>{busy === 'analyze' ? <LoaderCircle className="spin" size={15} /> : <WandSparkles size={15} />}</button></div>
               {detail.ai_analysis && Object.keys(detail.ai_analysis).length > 0 ? <div className="analysis-grid"><div><span>Priority</span><PriorityBadge value={String(detail.ai_analysis.priority || detail.priority || 'normal')} /></div><div><span>Category</span><Badge value={String(detail.ai_analysis.category || detail.category || 'uncategorized')} kind="lilac" /></div>{typeof detail.ai_analysis.phishing_risk === 'string' && <div><span>Risk assessment</span><Badge value={String(detail.ai_analysis.phishing_risk)} kind={detail.ai_analysis.phishing_risk === 'high' ? 'red' : detail.ai_analysis.phishing_risk === 'medium' ? 'amber' : 'green'} /></div>}</div> : <p className="insight-empty">Analyze this message to see its summary, priority, category, potential risks, and suggested next steps.</p>}
@@ -1513,11 +1602,28 @@ function TasksView({ tasks, busy, onAdd, onUpdate, onOpenEmail }: { tasks: TaskI
 }
 
 function BriefingView({ briefing, tasks, emails, busy, onRefresh, onOpenEmail, onGoTasks }: { briefing: Briefing | null; tasks: TaskItem[]; emails: EmailSummary[]; busy: boolean; onRefresh: () => void; onOpenEmail: (item: EmailSummary) => void; onGoTasks: () => void }) {
-  return <div className="view"><SectionTitle eyebrow="THE BIG PICTURE" title="Daily briefing" detail="A concise, local-AI digest to help you decide what deserves attention." actions={<button className="button-secondary" onClick={onRefresh} disabled={busy}><RefreshCw size={15} className={busy ? 'spin' : ''} /> Refresh</button>} />
-    <div className="briefing-main-grid"><div className="briefing-document"><div className="briefing-document-top"><div className="briefing-document-icon"><Sparkles size={19} /></div><div><span>GENERATED {briefing?.generated_at ? formatDate(briefing.generated_at, 'date').toUpperCase() : 'WHEN REQUESTED'}</span><h2>Your day, in focus.</h2></div><Badge value={briefing?.provider || 'local AI'} kind="green" /></div><BriefingText text={briefing?.summary || 'Your daily briefing will appear here after recent emails are indexed.'} /><div className="briefing-disclaimer"><ShieldCheck size={15} /><span>AI-generated briefing. Verify important facts and deadlines in the original message.</span></div></div>
-      <div className="briefing-side"><Panel title="At a glance" subtitle="Last 24 hours" icon={Gauge}><div className="briefing-counts"><div><span>Messages indexed</span><strong>{briefing?.counts?.emails_indexed_in_period ?? '—'}</strong></div><div><span>Unread</span><strong>{briefing?.counts?.unread_in_period ?? '—'}</strong></div><div><span>Urgent / high</span><strong>{briefing?.counts?.urgent_or_high ?? '—'}</strong></div><div><span>Open tasks</span><strong>{briefing?.counts?.open_tasks ?? tasks.length}</strong></div><div><span>Overdue tasks</span><strong className={briefing?.counts?.overdue_tasks ? 'count-danger' : ''}>{briefing?.counts?.overdue_tasks ?? 0}</strong></div></div></Panel>
-        <Panel title="Priority messages" subtitle="Messages with high or urgent classification">{briefing?.important_emails?.length ? briefing.important_emails.map((item) => <button className="briefing-email-link" key={item.id} onClick={() => onOpenEmail(item)}><span className="tiny-dot" /><div><strong>{item.subject}</strong><span>{senderName(item.from_address)}</span></div><PriorityBadge value={item.priority} /></button>) : <p className="muted-small">No messages currently classified as urgent or high. That doesn't mean no messages need attention.</p>}</Panel>
-        <Panel title="Tasks due" subtitle="Open commitments"><div className="briefing-task-links">{briefing?.tasks_due_today_or_overdue?.length ? briefing.tasks_due_today_or_overdue.map((task) => <div className="briefing-task-link" key={task.id}><Clock3 size={14} /><span>{task.title}</span></div>) : <p className="muted-small">No due or overdue tasks surfaced.</p>}<button className="panel-link" onClick={onGoTasks}>Open task list <ArrowRight size={14} /></button></div></Panel>
+  const sections = briefing?.sections;
+  const coverage = briefing?.coverage;
+  const renderEmailSection = (title: string, subtitle: string, items?: EmailSummary[]) => (
+    <Panel title={title} subtitle={subtitle}>
+      {items?.length ? items.map((item) => <button className="briefing-email-link" key={item.id} onClick={() => onOpenEmail(item)}>
+        <span className="tiny-dot" /><div><strong>{item.subject || '(no subject)'}</strong><span>{senderName(item.from_address)}</span></div><PriorityBadge value={item.priority} />
+      </button>) : <p className="muted-small">No matching messages were identified in the analysed emails.</p>}
+    </Panel>
+  );
+  return <div className="view"><SectionTitle eyebrow="THE BIG PICTURE" title="Daily briefing" detail="A decision-ready view of priorities, unread requests, commitments and what still needs review." actions={<button className="button-secondary" onClick={onRefresh} disabled={busy}><RefreshCw size={15} className={busy ? 'spin' : ''} /> Refresh</button>} />
+    <div className="briefing-main-grid"><div className="briefing-document"><div className="briefing-document-top"><div className="briefing-document-icon"><Sparkles size={19} /></div><div><span>GENERATED {briefing?.generated_at ? formatDate(briefing.generated_at, 'date').toUpperCase() : 'WHEN REQUESTED'}</span><h2>Your day, in focus.</h2></div><Badge value={briefing?.provider || 'AI provider'} kind="green" /></div><BriefingText text={briefing?.summary || 'Your daily briefing will appear here after recent emails are analysed.'} />
+      {coverage && <div className="briefing-disclaimer"><Gauge size={15} /><span>Analysis coverage: {coverage.emails_analyzed ?? 0} of {coverage.emails_fetched ?? 0} fetched messages analysed{coverage.truncated ? '. The analysis limit was reached; this is a partial briefing, not a complete inbox review.' : '. All fetched messages in this period were analysed.'}</span></div>}
+      <div className="briefing-disclaimer"><ShieldCheck size={15} /><span>AI-generated briefing. Verify important facts and deadlines in the original message.</span></div></div>
+      <div className="briefing-side"><Panel title="At a glance" subtitle="Last 24 hours" icon={Gauge}><div className="briefing-counts"><div><span>Messages fetched</span><strong>{coverage?.emails_fetched ?? briefing?.counts?.emails_indexed_in_period ?? '—'}</strong></div><div><span>Messages analysed</span><strong>{coverage?.emails_analyzed ?? '—'}</strong></div><div><span>Unread</span><strong>{briefing?.counts?.unread_in_period ?? '—'}</strong></div><div><span>Urgent / high</span><strong>{briefing?.counts?.urgent_or_high ?? '—'}</strong></div><div><span>Open tasks</span><strong>{briefing?.counts?.open_tasks ?? tasks.length}</strong></div><div><span>Overdue tasks</span><strong className={briefing?.counts?.overdue_tasks ? 'count-danger' : ''}>{briefing?.counts?.overdue_tasks ?? 0}</strong></div></div></Panel>
+        {renderEmailSection('Priority attention', 'Urgent or high-priority messages', sections?.priority_attention || briefing?.important_emails)}
+        {renderEmailSection('Unread · action needed', 'Unread messages with a concrete request for you', sections?.unread_needing_action)}
+        {renderEmailSection('Other requested actions', 'Non-urgent messages that still need a response or action', sections?.other_actions)}
+        <Panel title="Possible tasks from email" subtitle="Evidence-backed suggestions · approve before saving">
+          {briefing?.proposed_tasks?.length ? briefing.proposed_tasks.map((proposal, index) => <div className="briefing-task-link" key={proposal.source_email_id + proposal.title + index}><Sparkles size={14} /><span><strong>{proposal.title}</strong><small>{proposal.source_subject} · {Math.round(proposal.confidence * 100)}% confidence</small><q>{proposal.evidence_quote}</q></span></div>) : <p className="muted-small">No task suggestions passed the evidence and confidence checks. This is not proof that no commitments exist in unanalysed messages.</p>}
+          <button className="panel-link" onClick={onGoTasks}>Review task list <ArrowRight size={14} /></button>
+        </Panel>
+        <Panel title="Existing tasks due" subtitle="Saved open commitments"><div className="briefing-task-links">{briefing?.tasks_due_today_or_overdue?.length ? briefing.tasks_due_today_or_overdue.map((task) => <div className="briefing-task-link" key={task.id}><Clock3 size={14} /><span>{task.title}</span></div>) : <p className="muted-small">No saved tasks due in this period.</p>}<button className="panel-link" onClick={onGoTasks}>Open task list <ArrowRight size={14} /></button></div></Panel>
       </div></div>
   </div>;
 }
@@ -1541,10 +1647,10 @@ function AssistantView({ messages, input, setInput, busy, model, onSubmit, onOpe
   const bottomRef = useRef<HTMLDivElement>(null);
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' }); }, [messages, busy]);
   const suggestions = ['What needs my attention today?', 'Find emails I haven’t replied to', 'Summarize important conversations', 'What tasks came from recent emails?'];
-  return <div className="view assistant-view"><SectionTitle eyebrow="YOUR THOUGHT PARTNER" title="AI assistant" detail="Ask questions across your locally indexed inbox. Email content is evidence, never instructions." actions={<span className="source-indicator"><span className={cx('status-dot', model?.available ? 'green' : 'amber')} />{model?.provider || 'Local AI'}</span>} />
-    <div className="assistant-layout"><div className="assistant-chat-card"><div className="assistant-chat-head"><div className="assistant-avatar"><Sparkles size={20} /></div><div><strong>Inbox assistant</strong><span><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /> {model?.available ? `${model.model || 'Ollama'} · running locally` : 'Heuristic fallback available'}</span></div><div className="assistant-head-spacer" /><Badge value="Private" kind="green" /></div>
+  return <div className="view assistant-view"><SectionTitle eyebrow="YOUR THOUGHT PARTNER" title="AI assistant" detail="Ask questions across your connected inbox. Email content is evidence, never instructions." actions={<span className="source-indicator"><span className={cx('status-dot', model?.available ? 'green' : 'amber')} />{model?.provider || 'Ollama'}</span>} />
+    <div className="assistant-layout"><div className="assistant-chat-card"><div className="assistant-chat-head"><div className="assistant-avatar"><Sparkles size={20} /></div><div><strong>Inbox assistant</strong><span><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /> {model?.ai_enabled === false ? 'AI disabled in Settings' : model?.available ? `${model.model || 'Ollama'} · hosted inference` : model?.detail || 'Configured AI provider unavailable'}</span></div><div className="assistant-head-spacer" /><Badge value="Private" kind="green" /></div>
       <div className="chat-stream">{messages.map((message, index) => <div className={cx('chat-message-wrap', message.role)} key={`${message.role}-${index}`}><div className={cx('chat-avatar', message.role === 'assistant' ? 'assistant-chat-avatar' : 'user-chat-avatar')}>{message.role === 'assistant' ? <Sparkles size={15} /> : <UserRound size={15} />}</div><div className="chat-message-content"><div className="chat-message-bubble">{message.text.split('\n').map((line, lineIndex) => <p key={lineIndex}>{line || '\u00a0'}</p>)}</div>{message.provider && <span className="chat-provider">Answered by {message.provider}</span>}{message.related && message.related.length > 0 && <div className="chat-related">{message.related.slice(0, 4).map((email) => <button key={email.id} onClick={() => onOpenEmail(email)}><Mail size={13} /><span>{email.subject}</span><ArrowUpRight size={12} /></button>)}</div>}</div></div>)}{busy && <div className="chat-message-wrap assistant"><div className="chat-avatar assistant-chat-avatar"><Sparkles size={15} /></div><div className="chat-message-bubble typing"><i /><i /><i /></div></div>}<div ref={bottomRef} /></div>
-      <div className="chat-compose-wrap"><form className="chat-compose" onSubmit={(event) => onSubmit(event)}><textarea rows={1} value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask anything about your email…" aria-label="Ask the local AI assistant" onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); onSubmit(); } }} /><button className="send-chat-button" type="submit" disabled={!input.trim() || busy} aria-label="Send message">{busy ? <LoaderCircle size={17} className="spin" /> : <ArrowUpRight size={17} />}</button></form><div className="chat-compose-caption"><span><ShieldCheck size={12} /> Processed locally when Ollama is available</span><span>Enter to send · Shift+Enter for new line</span></div></div>
+      <div className="chat-compose-wrap"><form className="chat-compose" onSubmit={(event) => onSubmit(event)}><textarea rows={1} value={input} onChange={(event) => setInput(event.target.value)} placeholder="Ask anything about your email…" aria-label="Ask the local AI assistant" onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); onSubmit(); } }} /><button className="send-chat-button" type="submit" disabled={!input.trim() || busy} aria-label="Send message">{busy ? <LoaderCircle size={17} className="spin" /> : <ArrowUpRight size={17} />}</button></form><div className="chat-compose-caption"><span><ShieldCheck size={12} /> Processed by your configured private AI provider when available</span><span>Enter to send · Shift+Enter for new line</span></div></div>
     </div><div className="assistant-aside"><Panel title="Try asking" subtitle="Useful starting points" icon={Sparkles}><div className="prompt-suggestions">{suggestions.map((suggestion) => <button key={suggestion} onClick={() => onSubmit(undefined, suggestion)}><span>{suggestion}</span><ArrowUpRight size={14} /></button>)}</div></Panel><Panel title="What the assistant can do" icon={BrainCircuit}><div className="capability-list"><div><span className="capability-icon mint"><Search size={15} /></span><div><strong>Find context</strong><p>Search your indexed conversations.</p></div></div><div><span className="capability-icon lilac"><ListTodo size={15} /></span><div><strong>Surface commitments</strong><p>Identify possible tasks and dates.</p></div></div><div><span className="capability-icon peach"><Mail size={15} /></span><div><strong>Prepare replies</strong><p>Drafts stay reviewable; sending requires approval.</p></div></div></div></Panel><div className="assistant-safety-note"><ShieldCheck size={16} /><p><strong>Safety boundary</strong><br />The assistant won't treat instructions embedded in emails as permission to act. Verify important conclusions against the original message.</p></div></div></div>
   </div>;
 }
@@ -1696,19 +1802,32 @@ function MemoryView({ memories, feedbackItems, busy, onSaveMemory, onDeleteMemor
   </div>;
 }
 
-function SettingsView({ auth, health, model, settings, busy, authStatusUnavailable, modelStatusUnavailable, onConnect, onRefresh, onUpdate }: { auth: AuthStatus | null; health: Record<string, unknown> | null; model: ModelStatus | null; settings: Record<string, unknown>; busy: string | null; authStatusUnavailable: boolean; modelStatusUnavailable: boolean; onConnect: () => void; onRefresh: () => void; onUpdate: (patch: Record<string, unknown>) => void }) {
+function SettingsView({ auth, health, model, settings, busy, authStatusUnavailable, modelStatusUnavailable, workerToken, onConnect, onRefresh, onUpdate, onRegisterWorker, onRevokeWorker }: { auth: AuthStatus | null; health: Record<string, unknown> | null; model: ModelStatus | null; settings: Record<string, unknown>; busy: string | null; authStatusUnavailable: boolean; modelStatusUnavailable: boolean; workerToken: string | null; onConnect: () => void; onRefresh: () => void; onUpdate: (patch: Record<string, unknown>) => void; onRegisterWorker: () => void; onRevokeWorker: () => void }) {
   const aiEnabled = settings.ai_enabled !== false;
   const autoSync = settings.auto_sync_enabled !== false;
   const interval = Number(settings.sync_interval_seconds || 300);
   const currentModel = String(settings.ollama_model || model?.model || 'llama3.2:3b');
   const models = model?.installed_models || [];
-  return <div className="view"><SectionTitle eyebrow="YOUR CONTROL PANEL" title="Settings & privacy" detail="Keep the agent local, inspect its status, and choose how it behaves." actions={<button className="button-secondary" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={15} /> Refresh status</button>} />
+  return <div className="view"><SectionTitle eyebrow="YOUR CONTROL PANEL" title="Settings & privacy" detail="Manage your connected account, hosted AI and privacy controls." actions={<button className="button-secondary" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={15} /> Refresh status</button>} />
     <div className="settings-layout"><div className="settings-main">
-      <Panel title="Connected account" subtitle="The Gmail identity the agent can access" icon={Mail}><div className="connected-account"><div className="connected-account-avatar"><Mail size={21} /></div><div className="connected-account-copy"><strong>{auth?.email || (authStatusUnavailable ? 'Gmail status unavailable' : 'No Gmail account connected')}</strong><span>{authStatusUnavailable ? 'The backend could not verify the bridge status. Retry before changing account authorization.' : auth?.connected ? 'Authorized through your local Google Apps Script bridge' : auth?.message || 'Connect an account to start working with live email.'}</span></div><Badge value={authStatusUnavailable ? 'Unknown' : auth?.connected ? 'Connected' : 'Not connected'} kind={authStatusUnavailable ? 'amber' : auth?.connected ? 'green' : 'amber'} /></div><div className="settings-row-action">{authStatusUnavailable ? <button className="button-secondary small" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={14} /> Retry connection check</button> : auth?.connected ? <p>Scopes: <code>{(auth.scopes || []).join(', ') || 'managed by local bridge'}</code></p> : /apps script bridge/i.test(auth?.message || '') ? <button className="button-secondary small" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={14} /> Check bridge setup</button> : <button className="button-primary small" onClick={onConnect}><ExternalLink size={14} /> Connect Gmail</button>}</div></Panel>
-      <Panel title="Local AI engine" subtitle="Inference stays on this machine when Ollama is active" icon={BrainCircuit}><div className="setting-toggle-row"><div className="setting-row-icon lilac"><Sparkles size={17} /></div><div className="setting-description"><strong>Enable AI analysis</strong><p>Allow the local model to summarize and reason over email that you request it to process.</p></div><Toggle value={aiEnabled} disabled={busy === 'settings'} onChange={(value) => onUpdate({ ai_enabled: value })} /></div><div className="model-setting"><label>Preferred Ollama model<select value={currentModel} onChange={(event) => onUpdate({ ollama_model: event.target.value })} disabled={busy === 'settings'}>{[...new Set([currentModel, ...models])].map((name) => <option key={name} value={name}>{name}</option>)}</select></label><div className="model-status"><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /><span>{modelStatusUnavailable ? 'Model status could not be checked. Refresh before changing model settings.' : model?.available ? `Ready · ${model.provider || 'Ollama'}` : model?.detail || 'Local model unavailable; heuristic fallback is in use.'}</span></div></div></Panel>
-      <Panel title="Background monitoring" subtitle="Routine sync can run while your local backend is running" icon={Activity}><div className="setting-toggle-row"><div className="setting-row-icon mint"><RefreshCw size={17} /></div><div className="setting-description"><strong>Automatic inbox sync</strong><p>Sync and index messages periodically. Background sync never sends, trashes, or archives messages.</p></div><Toggle value={autoSync} disabled={busy === 'settings'} onChange={(value) => onUpdate({ auto_sync_enabled: value })} /></div><div className="model-setting"><label>Sync interval<select value={String(interval)} onChange={(event) => onUpdate({ sync_interval_seconds: Number(event.target.value) })} disabled={busy === 'settings'}><option value="300">Every 5 minutes</option><option value="600">Every 10 minutes</option><option value="1800">Every 30 minutes</option><option value="3600">Every hour</option></select></label><p className="setting-footnote">This affects future worker cycles. Your computer and backend must remain on.</p></div></Panel>
+      <Panel title="Connected account" subtitle="The Gmail identity the agent can access" icon={Mail}><div className="connected-account"><div className="connected-account-avatar"><Mail size={21} /></div><div className="connected-account-copy"><strong>{auth?.email || (authStatusUnavailable ? 'Gmail status unavailable' : 'No Gmail account connected')}</strong><span>{authStatusUnavailable ? 'The backend could not verify the bridge status. Retry before changing account authorization.' : auth?.connected ? 'Authorized directly with Google OAuth' : auth?.message || 'Connect an account to start working with live email.'}</span></div><Badge value={authStatusUnavailable ? 'Unknown' : auth?.connected ? 'Connected' : 'Not connected'} kind={authStatusUnavailable ? 'amber' : auth?.connected ? 'green' : 'amber'} /></div><div className="settings-row-action">{authStatusUnavailable ? <button className="button-secondary small" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={14} /> Retry connection check</button> : auth?.connected ? <p>Scopes: <code>{(auth.scopes || []).join(', ') || 'Google OAuth'}</code></p> : /apps script bridge/i.test(auth?.message || '') ? <button className="button-secondary small" onClick={onRefresh} disabled={busy === 'refresh'}><RefreshCw size={14} /> Refresh status</button> : <button className="button-primary small" onClick={onConnect}><ExternalLink size={14} /> Connect Gmail</button>}</div></Panel>
+      <Panel title="AI engine" subtitle={model?.engine_mode === 'hosted' ? 'Your opted-in requests are processed by the configured hosted AI provider.' : 'Inference uses your configured private provider.'} icon={BrainCircuit}><div className="setting-toggle-row"><div className="setting-row-icon lilac"><Sparkles size={17} /></div><div className="setting-description"><strong>Enable AI analysis</strong><p>Allow the configured hosted AI model to summarize and reason over email that you explicitly request it to process.</p></div><Toggle value={aiEnabled} disabled={busy === 'settings'} onChange={(value) => onUpdate({ ai_enabled: value })} /></div><div className="model-setting">{model?.engine_mode === 'hosted' ? <div className="model-status"><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /><span>Server-managed model · {model?.model || 'Configured on the hosted AI service'}</span></div> : <label>Preferred Ollama model<select value={currentModel} onChange={(event) => onUpdate({ ollama_model: event.target.value })} disabled={busy === 'settings'}>{[...new Set([currentModel, ...models])].map((name) => <option key={name} value={name}>{name}</option>)}</select></label>}<div className="model-status"><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /><span>{modelStatusUnavailable ? 'Model status could not be checked. Refresh before changing model settings.' : model?.ai_enabled === false ? 'AI analysis is disabled. Enable it above to use the configured provider.' : model?.available ? `Ready · ${model.provider || 'Ollama'}` : model?.detail || 'The configured AI provider is not ready. Check its server configuration and availability.'}</span></div></div></Panel>
+      {model?.engine_mode !== 'hosted' && <Panel title="Private Windows AI worker" subtitle="Migration option: run Ollama on your own PC; this dashboard sends jobs over an authenticated outbound connection." icon={BrainCircuit}>
+        <div className="model-setting">
+          <div className="model-status"><span className={cx('status-dot', model?.available ? 'green' : 'amber')} /><span>{model?.worker_online ? `Worker online · ${model.model || 'Ollama'}` : model?.worker_registered ? 'Worker registered · PC currently offline' : 'No private worker registered'}</span></div>
+          <p className="setting-footnote">{model?.detail || 'Register this PC to enable local AI. Ollama is never exposed to the public internet.'}</p>
+          {workerToken && <div className="worker-token-box"><label>One-time worker token</label><input type="text" readOnly value={workerToken} onFocus={(event) => event.currentTarget.select()} /><p className="setting-footnote">Select and copy this token into the Windows worker setup prompt. It is shown only now. Never share it or commit it.</p></div>}
+          <div className="settings-row-action">
+            {!model?.worker_registered
+              ? <button className="button-primary small" onClick={onRegisterWorker} disabled={busy === 'worker-register'}>{busy === 'worker-register' ? 'Registering…' : 'Register this PC'}</button>
+              : <button className="button-secondary small" onClick={onRevokeWorker} disabled={busy === 'worker-revoke'}>{busy === 'worker-revoke' ? 'Revoking…' : 'Revoke worker'}</button>}
+          </div>
+          <p className="setting-footnote">Run <code>worker\\run_worker.py</code> from the repository's worker folder. Setup instructions are in <code>worker\\README.md</code>.</p>
+        </div>
+      </Panel>}
+      <Panel title="Background monitoring" subtitle="Routine sync can run while your local backend is running" icon={Activity}><div className="setting-toggle-row"><div className="setting-row-icon mint"><RefreshCw size={17} /></div><div className="setting-description"><strong>Automatic inbox sync</strong><p>Sync and index messages periodically. Background sync never sends, trashes, or archives messages.</p></div><Toggle value={autoSync} disabled={busy === 'settings'} onChange={(value) => onUpdate({ auto_sync_enabled: value })} /></div><div className="model-setting"><label>Sync interval<select value={String(interval)} onChange={(event) => onUpdate({ sync_interval_seconds: Number(event.target.value) })} disabled={busy === 'settings'}><option value="300">Every 5 minutes</option><option value="600">Every 10 minutes</option><option value="1800">Every 30 minutes</option><option value="3600">Every hour</option></select></label><p className="setting-footnote">This affects future sync cycles. InboxMind's backend must remain available.</p></div></Panel>
       <Panel title="Local storage" subtitle="Data files created by your backend" icon={FolderOpen}><div className="storage-row"><div><span>Database</span><strong>{String(health?.database || 'Local SQLite')}</strong></div><div><span>Local files folder</span><strong>{String(settings.local_files_dir || './local_files')}</strong></div><div><span>Data directory</span><strong>{String(settings.data_dir || './data')}</strong></div></div></Panel>
-    </div><div className="settings-aside"><div className="privacy-card"><div className="privacy-card-icon"><ShieldCheck size={21} /></div><h3>Private by default.</h3><p>The dashboard runs on localhost and calls your local backend. Email data isn't sent to a paid AI API by this interface.</p><div className="privacy-checks"><span><CheckCircle2 size={14} /> Local Ollama mode</span><span><CheckCircle2 size={14} /> Explicit send approval</span><span><CheckCircle2 size={14} /> Trash, not permanent delete</span><span><CheckCircle2 size={14} /> API binds to loopback</span></div></div><Panel title="Runtime health" icon={Gauge}><div className="runtime-list"><RuntimeRow label="Backend" value={health ? 'Online' : 'Unknown'} ok={Boolean(health)} /><RuntimeRow label="Gmail bridge" value={authStatusUnavailable ? 'Unknown' : auth?.connected ? 'Connected' : 'Not connected'} ok={Boolean(auth?.connected && !authStatusUnavailable)} /><RuntimeRow label="Local model" value={modelStatusUnavailable ? 'Unknown' : model?.available ? 'Ready' : model ? 'Fallback' : 'Checking'} ok={Boolean(model?.available && !modelStatusUnavailable)} /><RuntimeRow label="Background sync" value={autoSync ? 'Enabled' : 'Paused'} ok={autoSync} /><RuntimeRow label="Data location" value="This device" ok /></div></Panel><div className="settings-warning"><CircleAlert size={16} /><p><strong>Protect local files.</strong> Email index data and preferences are stored in your local backend database. Use your operating system's disk encryption and protect backups.</p></div></div></div>
+    </div><div className="settings-aside"><div className="privacy-card"><div className="privacy-card-icon"><ShieldCheck size={21} /></div><h3>Private by default.</h3><p>The backend sends only explicitly requested, opted-in AI content to your configured private AI provider. The browser never connects directly to the model provider.</p><div className="privacy-checks"><span><CheckCircle2 size={14} /> Hosted AI mode</span><span><CheckCircle2 size={14} /> Explicit send approval</span><span><CheckCircle2 size={14} /> Trash, not permanent delete</span><span><CheckCircle2 size={14} /> Hosted processing</span></div></div><Panel title="Runtime health" icon={Gauge}><div className="runtime-list"><RuntimeRow label="Backend" value={health ? 'Online' : 'Unknown'} ok={Boolean(health)} /><RuntimeRow label="Gmail bridge" value={authStatusUnavailable ? 'Unknown' : auth?.connected ? 'Connected' : 'Not connected'} ok={Boolean(auth?.connected && !authStatusUnavailable)} /><RuntimeRow label="AI model" value={modelStatusUnavailable ? 'Unknown' : model?.ai_enabled === false ? 'AI disabled' : model?.available ? 'Ready' : model ? 'Offline' : 'Checking'} ok={Boolean(model?.available && model?.ai_enabled !== false && !modelStatusUnavailable)} /><RuntimeRow label="Background sync" value={autoSync ? 'Enabled' : 'Paused'} ok={autoSync} /><RuntimeRow label="Data location" value="Secure hosted storage" ok /></div></Panel><div className="settings-warning"><CircleAlert size={16} /><p><strong>Protect local files.</strong> Email index data and preferences are stored in your local backend database. Use your operating system's disk encryption and protect backups.</p></div></div></div>
   </div>;
 }
 function RuntimeRow({ label, value, ok }: { label: string; value: string; ok: boolean }) { return <div className="runtime-row"><span>{label}</span><strong><span className={cx('status-dot', ok ? 'green' : 'amber')} />{value}</strong></div>; }
@@ -1720,4 +1839,41 @@ function Modal({ title, description, children, onClose, wide = false }: { title:
 }
 function ConfirmDialog({ config, onCancel, onConfirm }: { config: DialogConfig; onCancel: () => void; onConfirm: () => void }) {
   return <Modal title={config.title} description={config.description} onClose={onCancel}><div className="confirm-icon-wrap"><div className={cx('confirm-icon', config.danger && 'danger')}><CircleAlert size={21} /></div><p>{config.danger ? 'This action affects your real account. Please review before continuing.' : 'Please confirm this action before the agent proceeds.'}</p></div><div className="modal-actions"><button className="button-secondary" onClick={onCancel}>Cancel</button><button className={cx('button-primary', config.danger && 'button-danger')} onClick={onConfirm}>{config.confirmLabel || 'Confirm'}</button></div></Modal>;
+}
+
+
+function AccountAccess({ checking = false }: {
+  checking?: boolean;
+  onAuthenticated?: () => Promise<void> | void;
+}) {
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('auth_error') === 'google_denied') {
+      setError('Google sign-in was cancelled. You can try again whenever you are ready.');
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (params.get('signed_in') === '1') {
+      setNotice('You are signed in. Loading your private workspace…');
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []);
+
+  if (checking) return <main className="auth-screen"><section className="auth-card auth-checking"><div className="auth-brand"><span><Sparkles size={19} /></span><strong>inbox<span>mind</span></strong></div><LoaderCircle className="spin" size={24} /><p>Checking your secure session…</p></section></main>;
+
+  return <main className="auth-screen">
+    <section className="auth-card">
+      <div className="auth-brand"><span><Sparkles size={19} /></span><strong>inbox<span>mind</span></strong></div>
+      <div className="auth-eyebrow">YOUR PERSONAL AI SECRETARY</div>
+      <h1>Welcome to InboxMind</h1>
+      <p className="auth-description">Sign in securely with your Google account to open your private InboxMind workspace.</p>
+      {error && <div className="auth-message auth-error" role="alert">{error}</div>}
+      {notice && <div className="auth-message auth-success" role="status">{notice}</div>}
+      <button type="button" className="auth-google" onClick={() => window.location.assign(API_BASE + '/auth/google/login')}>
+        <Mail size={16} /> Continue with Google
+      </button>
+      <div className="auth-footnote"><ShieldCheck size={14} /><span>Google verifies your InboxMind identity. Gmail access is a separate authorization that you grant directly to InboxMind; mailbox credentials are encrypted and scoped to your account.</span></div>
+    </section>
+    <p className="auth-legal">Secure account access · Private workspace · You stay in control</p>
+  </main>;
 }

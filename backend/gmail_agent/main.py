@@ -100,6 +100,12 @@ def _missing_gmail_error(exc: Exception) -> HTTPException:
 
 def create_app(settings: Settings | None = None, gmail: GmailClient | None = None, ai: LocalAIEngine | None = None, start_worker: bool | None = None) -> FastAPI:
     settings = settings or get_settings()
+    if settings.app_env == "production":
+        raise RuntimeError(
+            "Public production deployment is disabled: InboxMind still uses a shared single-user "
+            "service/token store. Implement and enable the multi-tenant authentication and data-isolation "
+            "migration before setting APP_ENV=production."
+        )
     services = Services(settings, gmail=gmail, ai=ai)
     should_start_worker = settings.auto_sync_enabled if start_worker is None else start_worker
 

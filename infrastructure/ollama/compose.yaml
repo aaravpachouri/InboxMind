@@ -1,0 +1,14 @@
+services:
+  ollama:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - ollama_models:/root/.ollama
+    # Bind only to loopback for local testing. In production, expose through
+    # a private network or authenticated TLS gateway, never a public raw port.
+    ports:
+      - "127.0.0.1:11434:11434"
+    command: ["serve"]
+
+volumes:
+  ollama_models:
