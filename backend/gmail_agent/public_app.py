@@ -9,10 +9,10 @@ import os
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from urllib.parse import urlencode
 
 import httpx
@@ -157,6 +157,110 @@ def _get_hosted_gmail(user: dict[str, Any], account_id: str | None = None):
         raise HTTPException(409, "More than one Gmail account is connected. Select an account in Settings.")
     row = rows[0]
     return HostedGmail(str(user["id"]), str(row["id"])), str(row["email"]), str(row["id"])
+
+
+class BetaSignupRequest(BaseModel):
+    email: str = Field(min_length=5, max_length=254)
+    name: str = Field(default="", max_length=100)
+    audience: Literal["student", "freelancer", "indie_hacker", "consultant"]
+    role_context: str = Field(min_length=2, max_length=160)
+    workflow: str = Field(min_length=20, max_length=2000)
+    feedback_commitment: bool
+    contact_consent: bool
+    consent_version: Literal["beta-2026-11-14"] = "beta-2026-11-14"
+    website: str = Field(default="", max_length=200)
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if not re.fullmatch(r"[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+", normalized):
+            raise ValueError("Enter a valid email address.")
+        return normalized
+
+
+class BetaFeedbackRequest(BaseModel):
+    feedback_token: str = Field(min_length=32, max_length=256)
+    category: Literal["onboarding", "inbox", "priorities", "tasks", "ai", "privacy", "bug", "other"]
+    rating: int = Field(ge=1, le=5)
+    details: str = Field(min_length=10, max_length=3000)
+    permission_to_quote: bool = False
+
+
+class BetaDeleteRequest(BaseModel):
+    feedback_token: str = Field(min_length=32, max_length=256)
+
+
+@app.post("/api/v1/public/beta-signups")
+def create_beta_signup(body: BetaSignupRequest, request: Request) -> dict[str, Any]:
+    """Collect a beta request with explicit contact and feedback consent; never subscribe to marketing."""
+    if body.website.strip():
+        # Honeypot: return a generic success response without persisting bot submissions.
+        return {"accepted": True, "message": "Thanks — your beta request has been received."}
+    if not body.feedback_commitment or not body.contact_consent:
+        raise HTTPException(422, "Please confirm the beta feedback commitment and permission to contact you.")
+    token = secrets.token_urlsafe(36)
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        row = conn.execute(
+            """INSERT INTO beta_signups
+                 (email, email_normalized, name, audience, role_context, workflow,
+                  feedback_commitment, contact_consent, consent_version, feedback_token_hash,
+                  source, status, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,true,true,%s,%s,'beta_landing_page','new',now(),now())
+               ON CONFLICT (email_normalized) DO UPDATE SET
+                 name=EXCLUDED.name, audience=EXCLUDED.audience, role_context=EXCLUDED.role_context,
+                 workflow=EXCLUDED.workflow, feedback_commitment=true, contact_consent=true,
+                 consent_version=EXCLUDED.consent_version, feedback_token_hash=EXCLUDED.feedback_token_hash,
+                 updated_at=now()
+               RETURNING id, status""",
+            (body.email, body.email, body.name.strip(), body.audience, body.role_context.strip(),
+             body.workflow.strip(), body.consent_version, _hash(token)),
+        ).fetchone()
+    if not row:
+        raise HTTPException(503, "We could not save your beta request. Please try again later.")
+    return {
+        "accepted": True,
+        "status": str(row["status"]),
+        "feedback_token": token,
+        "message": "Thanks — your beta request is saved. We'll contact you about access, and you can use the feedback form on this page later.",
+    }
+
+
+@app.post("/api/v1/public/beta-feedback")
+def create_beta_feedback(body: BetaFeedbackRequest) -> dict[str, Any]:
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        signup = conn.execute(
+            """SELECT id FROM beta_signups
+               WHERE feedback_token_hash=%s AND status <> 'deleted'
+               LIMIT 1""",
+            (_hash(body.feedback_token),),
+        ).fetchone()
+        if not signup:
+            raise HTTPException(404, "Beta feedback link not found. Submit the beta request again from this device.")
+        row = conn.execute(
+            """INSERT INTO beta_feedback
+                 (signup_id, category, rating, details, permission_to_quote, created_at)
+               VALUES (%s,%s,%s,%s,%s,now())
+               RETURNING id""",
+            (signup["id"], body.category, body.rating, body.details.strip(), body.permission_to_quote),
+        ).fetchone()
+    return {"accepted": True, "feedback_id": str(row["id"]), "message": "Thank you — your feedback has been recorded."}
+
+
+@app.delete("/api/v1/public/beta-signups")
+def delete_beta_signup(body: BetaDeleteRequest) -> dict[str, bool]:
+    """Allow a beta applicant to delete their signup and feedback using their one-time bearer token."""
+    pool = _pool_or_503()
+    with pool.connection() as conn, conn.transaction():
+        deleted = conn.execute(
+            "DELETE FROM beta_signups WHERE feedback_token_hash=%s RETURNING id",
+            (_hash(body.feedback_token),),
+        ).fetchone()
+    if not deleted:
+        raise HTTPException(404, "No beta signup was found for this deletion link.")
+    return {"deleted": True}
 
 
 @app.get("/health")
